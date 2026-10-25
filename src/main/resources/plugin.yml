@@ -1,0 +1,15 @@
+name: WFs_BBRL_Basics
+prefix: "WF's BBRL Basics"
+version: 1.0.0
+main: dev.whistle.WFsBBRLBasics
+api-version: '26.3'
+description: Basic utilities for BBRL, including the admin Whistle.
+commands:
+  whistle:
+    description: Gives you the Whistle.
+    usage: /whistle
+    permission: whistle.give
+permissions:
+  whistle.give:
+    description: Allows use of /whistle
+    default: op
