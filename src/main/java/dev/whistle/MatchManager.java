@@ -126,6 +126,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(host, "You are already in a match! Use /match leave first.");
             return;
         }
+        boolean othersOnline = Bukkit.getOnlinePlayers().stream()
+                .anyMatch(p -> !p.getUniqueId().equals(host.getUniqueId()));
+        if (!othersOnline) {
+            error(host, "There are no other players online!");
+            return;
+        }
+
         Match match = new Match(host.getUniqueId());
         matchByPlayer.put(host.getUniqueId(), match);
         host.sendMessage(Component.text("Match created! You are on the ", NamedTextColor.GREEN)
