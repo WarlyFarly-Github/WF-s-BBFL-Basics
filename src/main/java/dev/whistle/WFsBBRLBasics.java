@@ -9,6 +9,7 @@ import net.kyori.adventure.title.Title;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
 import org.bukkit.command.Command;
+import org.bukkit.command.PluginCommand;
 import org.bukkit.command.CommandSender;
 import org.bukkit.entity.Player;
 import org.bukkit.event.Event;
@@ -28,12 +29,26 @@ import java.util.UUID;
 public final class WFsBBRLBasics extends JavaPlugin implements Listener {
 
     private NamespacedKey whistleKey;
+    private MatchManager matches;
     private final Map<UUID, Long> lastBlown = new HashMap<>();
 
     @Override
     public void onEnable() {
         whistleKey = new NamespacedKey(this, "whistle");
         getServer().getPluginManager().registerEvents(this, this);
+
+        matches = new MatchManager(this);
+        getServer().getPluginManager().registerEvents(matches, this);
+        PluginCommand matchCommand = getCommand("match");
+        if (matchCommand != null) {
+            matchCommand.setExecutor(matches);
+            matchCommand.setTabCompleter(matches);
+        }
+    }
+
+    @Override
+    public void onDisable() {
+        if (matches != null) matches.shutdown();
     }
 
     @Override

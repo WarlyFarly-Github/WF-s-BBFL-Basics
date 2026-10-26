@@ -1,15 +1,23 @@
 name: WFs_BBRL_Basics
 prefix: "WF's BBRL Basics"
 version: 1.0.0
+author: WarlyFarly
 main: dev.whistle.WFsBBRLBasics
 api-version: '26.3'
-description: Basic utilities for BBRL, including the admin Whistle.
+description: Basic utilities for BBRL, including the admin Whistle and football matches.
 commands:
   whistle:
     description: Gives you the Whistle.
     usage: /whistle
     permission: whistle.give
+  match:
+    description: Create and manage football matches.
+    usage: /match <create|invite|start|goal|end|leave|accept|decline>
+    permission: wfsbbrl.match
 permissions:
   whistle.give:
     description: Allows use of /whistle
     default: op
+  wfsbbrl.match:
+    description: Allows use of /match
+    default: true
