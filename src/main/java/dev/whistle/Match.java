@@ -5,12 +5,16 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.SulfurCube;
+import org.bukkit.scheduler.BukkitTask;
 
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
@@ -32,12 +36,25 @@ final class Match {
         }
     }
 
+    enum Phase { FIRST_HALF, COUNTDOWN, SECOND_HALF }
+
     final UUID host;
     int redScore;
     int blueScore;
     boolean started;
     SulfurCube ball;
     UUID lastKicker; // last match member to hit the ball
+
+    // Match timer
+    Phase phase = Phase.FIRST_HALF;
+    int secondsLeft;
+    BukkitTask timerTask;
+    final BossBar timerBar = BossBar.bossBar(
+            Component.empty(), 1.0f, BossBar.Color.YELLOW, BossBar.Overlay.PROGRESS);
+
+    // Where everyone (and the ball) were when the match started, used to reset after the first half.
+    final Map<UUID, Location> startPositions = new HashMap<>();
+    Location ballStart;
 
     private final Set<UUID> red = new LinkedHashSet<>();
     private final Set<UUID> blue = new LinkedHashSet<>();
@@ -98,10 +115,12 @@ final class Match {
 
     void showBar(Player player) {
         player.showBossBar(bar);
+        player.showBossBar(timerBar);
     }
 
     void hideBar(Player player) {
         player.hideBossBar(bar);
+        player.hideBossBar(timerBar);
     }
 
     void addGoal(Team team) {

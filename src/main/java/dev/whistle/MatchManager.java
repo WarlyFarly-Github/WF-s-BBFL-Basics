@@ -1,6 +1,7 @@
 package dev.whistle;
 
 import dev.whistle.Match.Team;
+import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -26,6 +27,7 @@ import org.bukkit.event.entity.ExplosionPrimeEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
@@ -35,6 +37,7 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.util.Vector;
 
+import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -45,6 +48,8 @@ import java.util.UUID;
 final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private static final long INVITE_TIMEOUT_MS = 60_000;
+    private static final int HALF_SECONDS = 5 * 60;   // length of each half
+    private static final int COUNTDOWN_SECONDS = 5;   // break between the halves
     private static final List<String> SUBCOMMANDS =
             List.of("create", "invite", "start", "goal", "end", "leave", "accept", "decline");
 
@@ -75,6 +80,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     /** Removes every ball on shutdown so none are left behind. */
     void shutdown() {
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
+            if (m.timerTask != null) m.timerTask.cancel();
             if (m.ball != null) m.ball.remove();
         });
     }
@@ -175,11 +181,17 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         boolean firstStart = !match.started;
         match.started = true;
+        match.ballStart = host.getLocation().clone();
         spawnBall(match, host.getLocation());
+        if (isFrozen(match)) freezeBall(match);
 
         if (firstStart) {
-            for (Player p : match.onlineMembers()) match.showBar(p);
+            for (Player p : match.onlineMembers()) {
+                match.startPositions.put(p.getUniqueId(), p.getLocation().clone());
+                match.showBar(p);
+            }
             match.broadcast(Component.text("The match has started!", NamedTextColor.GREEN, TextDecoration.BOLD));
+            startTimer(match);
         } else {
             host.sendMessage(Component.text("The ball was moved to your location.", NamedTextColor.YELLOW));
         }
@@ -256,7 +268,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         match.add(player.getUniqueId(), invite.team());
         matchByPlayer.put(player.getUniqueId(), match);
-        if (match.started) match.showBar(player);
+        if (match.started) {
+            match.showBar(player);
+            match.startPositions.putIfAbsent(player.getUniqueId(), player.getLocation().clone());
+        }
 
         match.broadcast(Component.text(player.getName(), NamedTextColor.YELLOW)
                 .append(Component.text(" joined the ", NamedTextColor.GRAY))
@@ -417,11 +432,47 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 && entity.getPersistentDataContainer().has(ballKey, PersistentDataType.BYTE);
     }
 
+    private boolean isFrozen(Match match) {
+        return match.started && match.phase == Match.Phase.COUNTDOWN;
+    }
+
+    private void freezeBall(Match match) {
+        if (match.ball == null) return;
+        match.ball.setGravity(false);
+        match.ball.setVelocity(new Vector(0, 0, 0));
+    }
+
+    private Match matchOfBall(Entity ball) {
+        for (Match m : matchByPlayer.values()) {
+            if (m.ball != null && m.ball.equals(ball)) return m;
+        }
+        return null;
+    }
+
+    /** During the half-time countdown players can look around but can't move. */
+    @EventHandler
+    public void onMove(PlayerMoveEvent event) {
+        Match match = matchByPlayer.get(event.getPlayer().getUniqueId());
+        if (match == null || !isFrozen(match)) return;
+
+        Location from = event.getFrom();
+        Location to = event.getTo();
+        if (from.getX() != to.getX() || from.getY() != to.getY() || from.getZ() != to.getZ()) {
+            Location fixed = from.clone();
+            fixed.setYaw(to.getYaw());
+            fixed.setPitch(to.getPitch());
+            event.setTo(fixed);
+        }
+    }
+
     /** The ball takes no damage; hitting it kicks it in the direction you're facing. */
     @EventHandler
     public void onBallDamage(EntityDamageEvent event) {
         if (!isBall(event.getEntity())) return;
         event.setCancelled(true);
+
+        Match ballMatch = matchOfBall(event.getEntity());
+        if (ballMatch != null && isFrozen(ballMatch)) return; // ball is frozen during the countdown
 
         if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker) {
             Vector direction = kicker.getLocation().getDirection().setY(0);
@@ -445,6 +496,82 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     @EventHandler
     public void onBallExplode(ExplosionPrimeEvent event) {
         if (isBall(event.getEntity())) event.setCancelled(true);
+    }
+
+    // ------------------------------------------------------------------ match timer
+
+    private void startTimer(Match match) {
+        match.phase = Match.Phase.FIRST_HALF;
+        match.secondsLeft = HALF_SECONDS;
+        updateTimerBar(match);
+        match.timerTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> tickTimer(match), 20L, 20L);
+    }
+
+    private void tickTimer(Match match) {
+        match.secondsLeft--;
+        switch (match.phase) {
+            case FIRST_HALF -> {
+                if (match.secondsLeft <= 0) beginHalfTime(match);
+                else updateTimerBar(match);
+            }
+            case COUNTDOWN -> {
+                if (match.secondsLeft <= 0) beginSecondHalf(match);
+                else showCountdown(match);
+            }
+            case SECOND_HALF -> {
+                if (match.secondsLeft <= 0) endMatch(match, "Full time!");
+                else updateTimerBar(match);
+            }
+        }
+    }
+
+    /** End of the first half: put everyone (and the ball) back where the match started, then count down. */
+    private void beginHalfTime(Match match) {
+        for (Player p : match.onlineMembers()) {
+            Location start = match.startPositions.get(p.getUniqueId());
+            if (start != null) p.teleport(start);
+        }
+        if (match.ballStart != null) spawnBall(match, match.ballStart);
+        freezeBall(match);
+
+        match.phase = Match.Phase.COUNTDOWN;
+        match.secondsLeft = COUNTDOWN_SECONDS;
+        showCountdown(match);
+    }
+
+    private void beginSecondHalf(Match match) {
+        match.phase = Match.Phase.SECOND_HALF;
+        match.secondsLeft = HALF_SECONDS;
+        if (match.ball != null) match.ball.setGravity(true);
+        updateTimerBar(match);
+
+        Title title = Title.title(
+                Component.text("Kick off!", NamedTextColor.GREEN, TextDecoration.BOLD),
+                Component.text("Second half", NamedTextColor.GRAY));
+        for (Player p : match.onlineMembers()) p.showTitle(title);
+    }
+
+    private void updateTimerBar(Match match) {
+        int seconds = Math.max(match.secondsLeft, 0);
+        String time = String.format("%d:%02d", seconds / 60, seconds % 60);
+        String half = match.phase == Match.Phase.FIRST_HALF ? "First Half" : "Second Half";
+
+        match.timerBar.color(BossBar.Color.YELLOW);
+        match.timerBar.progress(Math.min(1.0f, seconds / (float) HALF_SECONDS));
+        match.timerBar.name(Component.text(half + " - " + time, NamedTextColor.YELLOW, TextDecoration.BOLD));
+    }
+
+    private void showCountdown(Match match) {
+        match.timerBar.color(BossBar.Color.GREEN);
+        match.timerBar.progress(1.0f);
+        match.timerBar.name(Component.text("Half Time - second half starts in " + match.secondsLeft,
+                NamedTextColor.GREEN, TextDecoration.BOLD));
+
+        Title title = Title.title(
+                Component.text(String.valueOf(match.secondsLeft), NamedTextColor.GOLD, TextDecoration.BOLD),
+                Component.text("Second half starts in...", NamedTextColor.GRAY),
+                Title.Times.times(Duration.ZERO, Duration.ofMillis(900), Duration.ofMillis(100)));
+        for (Player p : match.onlineMembers()) p.showTitle(title);
     }
 
     // ------------------------------------------------------------------ cleanup
@@ -471,6 +598,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void endMatch(Match match, String reason) {
+        if (match.timerTask != null) match.timerTask.cancel();
         if (match.ball != null) match.ball.remove();
         Component message = Component.text(reason, NamedTextColor.YELLOW);
 
