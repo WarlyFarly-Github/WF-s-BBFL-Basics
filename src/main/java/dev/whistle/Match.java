@@ -8,6 +8,7 @@ import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.SulfurCube;
+import org.bukkit.inventory.ItemStack;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.util.ArrayList;
@@ -36,7 +37,9 @@ final class Match {
         }
     }
 
-    enum Phase { FIRST_HALF, COUNTDOWN, SECOND_HALF }
+    enum Phase { FIRST_HALF, SECOND_HALF, COUNTDOWN }
+
+    enum CountdownType { START, HALF_TIME, GOAL }
 
     final UUID host;
     int redScore;
@@ -46,15 +49,22 @@ final class Match {
     UUID lastKicker; // last match member to hit the ball
 
     // Match timer
-    Phase phase = Phase.FIRST_HALF;
-    int secondsLeft;
-    BukkitTask timerTask;
+    Phase phase = Phase.FIRST_HALF;          // COUNTDOWN means everything is frozen
+    Phase resumePhase = Phase.FIRST_HALF;    // the half to carry on with after a countdown
+    CountdownType countdownType = CountdownType.START;
+    int secondsLeft;                         // play time left in the current half (paused during countdowns)
+    int countdownLeft;                       // seconds left in the current freeze
+    BukkitTask timerTask;                    // ticks the half timer
+    BukkitTask countdownTask;                // ticks the freeze countdown
     final BossBar timerBar = BossBar.bossBar(
             Component.empty(), 1.0f, BossBar.Color.YELLOW, BossBar.Overlay.PROGRESS);
 
     // Where everyone (and the ball) were when the match started, used to reset after the first half.
     final Map<UUID, Location> startPositions = new HashMap<>();
     Location ballStart;
+
+    // Each player's own chestplate, put back when they leave or the match ends.
+    final Map<UUID, ItemStack> savedChestplates = new HashMap<>();
 
     private final Set<UUID> red = new LinkedHashSet<>();
     private final Set<UUID> blue = new LinkedHashSet<>();

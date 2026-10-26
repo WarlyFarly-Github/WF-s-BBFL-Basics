@@ -8,6 +8,7 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
+import org.bukkit.Color;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
@@ -22,16 +23,20 @@ import org.bukkit.entity.SulfurCube;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.ExplosionPrimeEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
+import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.LeatherArmorMeta;
 import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
@@ -68,6 +73,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private final JavaPlugin plugin;
     private final NamespacedKey ballKey;
     private final NamespacedKey targetKey;
+    private final NamespacedKey jerseyKey;
     private final Map<UUID, Match> matchByPlayer = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
 
@@ -75,12 +81,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.plugin = plugin;
         this.ballKey = new NamespacedKey(plugin, "football");
         this.targetKey = new NamespacedKey(plugin, "invite_target");
+        this.jerseyKey = new NamespacedKey(plugin, "jersey");
     }
 
     /** Removes every ball on shutdown so none are left behind. */
     void shutdown() {
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
-            if (m.timerTask != null) m.timerTask.cancel();
+            cancelTasks(m);
+            m.onlineMembers().forEach(p -> restoreChestplate(m, p));
             if (m.ball != null) m.ball.remove();
         });
     }
@@ -189,6 +197,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             for (Player p : match.onlineMembers()) {
                 match.startPositions.put(p.getUniqueId(), p.getLocation().clone());
                 match.showBar(p);
+                giveJersey(match, p);
             }
             match.broadcast(Component.text("The match has started!", NamedTextColor.GREEN, TextDecoration.BOLD));
             startTimer(match);
@@ -202,6 +211,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (match == null) return;
         if (!match.started) {
             error(host, "The match hasn't started yet.");
+            return;
+        }
+        if (match.phase == Match.Phase.COUNTDOWN) {
+            error(host, "You can't score during a countdown.");
             return;
         }
         if (args.length < 2 || !(args[1].equalsIgnoreCase("red") || args[1].equalsIgnoreCase("blue"))) {
@@ -223,12 +236,16 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         match.addGoal(team);
 
+        // The title stays up for the whole freeze; the countdown itself runs on the action bar.
         Title title = Title.title(
                 Component.text(team.label + " Goal!", team.color, TextDecoration.BOLD),
-                Component.text("Scored by " + scorer, NamedTextColor.WHITE));
+                Component.text("Scored by " + scorer, NamedTextColor.WHITE),
+                Title.Times.times(Duration.ofMillis(250), Duration.ofSeconds(4), Duration.ofMillis(500)));
         for (Player p : match.onlineMembers()) {
             p.showTitle(title);
         }
+
+        beginCountdown(match, Match.CountdownType.GOAL, match.phase);
     }
 
     private void leave(Player player) {
@@ -271,6 +288,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (match.started) {
             match.showBar(player);
             match.startPositions.putIfAbsent(player.getUniqueId(), player.getLocation().clone());
+            giveJersey(match, player);
         }
 
         match.broadcast(Component.text(player.getName(), NamedTextColor.YELLOW)
@@ -500,54 +518,78 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     // ------------------------------------------------------------------ match timer
 
+    /** Starts the match: a 5 second freeze, then the first half. */
     private void startTimer(Match match) {
-        match.phase = Match.Phase.FIRST_HALF;
         match.secondsLeft = HALF_SECONDS;
-        updateTimerBar(match);
         match.timerTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> tickTimer(match), 20L, 20L);
+        beginCountdown(match, Match.CountdownType.START, Match.Phase.FIRST_HALF);
     }
 
+    /** Ticks once a second. Play time is paused while a countdown is running. */
     private void tickTimer(Match match) {
+        if (match.phase == Match.Phase.COUNTDOWN) return;
+
         match.secondsLeft--;
-        switch (match.phase) {
-            case FIRST_HALF -> {
-                if (match.secondsLeft <= 0) beginHalfTime(match);
-                else updateTimerBar(match);
-            }
-            case COUNTDOWN -> {
-                if (match.secondsLeft <= 0) beginSecondHalf(match);
-                else showCountdown(match);
-            }
-            case SECOND_HALF -> {
-                if (match.secondsLeft <= 0) endMatch(match, "Full time!");
-                else updateTimerBar(match);
-            }
+        if (match.secondsLeft > 0) {
+            updateTimerBar(match);
+            return;
+        }
+        if (match.phase == Match.Phase.FIRST_HALF) {
+            match.secondsLeft = HALF_SECONDS;
+            beginCountdown(match, Match.CountdownType.HALF_TIME, Match.Phase.SECOND_HALF);
+        } else {
+            endMatch(match, "Full time!");
         }
     }
 
-    /** End of the first half: put everyone (and the ball) back where the match started, then count down. */
-    private void beginHalfTime(Match match) {
+    /**
+     * Freezes everyone and the ball for 5 seconds, then carries on in resumePhase.
+     * Used for the start of the match, half time and after every goal.
+     */
+    private void beginCountdown(Match match, Match.CountdownType type, Match.Phase resumePhase) {
+        if (match.countdownTask != null) match.countdownTask.cancel();
+
+        match.phase = Match.Phase.COUNTDOWN;
+        match.countdownType = type;
+        match.resumePhase = resumePhase;
+        match.countdownLeft = COUNTDOWN_SECONDS;
+
+        // After a goal or at half time, everyone (and the ball) goes back to the start positions.
+        if (type != Match.CountdownType.START) resetPositions(match);
+        freezeBall(match);
+        showCountdown(match);
+
+        match.countdownTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
+            match.countdownLeft--;
+            if (match.countdownLeft <= 0) {
+                match.countdownTask.cancel();
+                endCountdown(match);
+            } else {
+                showCountdown(match);
+            }
+        }, 20L, 20L);
+    }
+
+    private void resetPositions(Match match) {
         for (Player p : match.onlineMembers()) {
             Location start = match.startPositions.get(p.getUniqueId());
             if (start != null) p.teleport(start);
         }
         if (match.ballStart != null) spawnBall(match, match.ballStart);
-        freezeBall(match);
-
-        match.phase = Match.Phase.COUNTDOWN;
-        match.secondsLeft = COUNTDOWN_SECONDS;
-        showCountdown(match);
     }
 
-    private void beginSecondHalf(Match match) {
-        match.phase = Match.Phase.SECOND_HALF;
-        match.secondsLeft = HALF_SECONDS;
+    private void endCountdown(Match match) {
+        match.phase = match.resumePhase;
         if (match.ball != null) match.ball.setGravity(true);
         updateTimerBar(match);
 
+        Component subtitle = switch (match.countdownType) {
+            case START -> Component.text("First half", NamedTextColor.GRAY);
+            case HALF_TIME -> Component.text("Second half", NamedTextColor.GRAY);
+            case GOAL -> Component.empty();
+        };
         Title title = Title.title(
-                Component.text("Kick off!", NamedTextColor.GREEN, TextDecoration.BOLD),
-                Component.text("Second half", NamedTextColor.GRAY));
+                Component.text("Kick off!", NamedTextColor.GREEN, TextDecoration.BOLD), subtitle);
         for (Player p : match.onlineMembers()) p.showTitle(title);
     }
 
@@ -562,16 +604,100 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void showCountdown(Match match) {
+        int n = match.countdownLeft;
+        String label = switch (match.countdownType) {
+            case START -> "Match starts in " + n;
+            case HALF_TIME -> "Half Time - second half starts in " + n;
+            case GOAL -> "Goal! Play resumes in " + n;
+        };
         match.timerBar.color(BossBar.Color.GREEN);
         match.timerBar.progress(1.0f);
-        match.timerBar.name(Component.text("Half Time - second half starts in " + match.secondsLeft,
-                NamedTextColor.GREEN, TextDecoration.BOLD));
+        match.timerBar.name(Component.text(label, NamedTextColor.GREEN, TextDecoration.BOLD));
 
+        if (match.countdownType == Match.CountdownType.GOAL) {
+            // The goal title is still on screen, so count down on the action bar instead.
+            Component actionBar = Component.text("Play resumes in " + n, NamedTextColor.GOLD, TextDecoration.BOLD);
+            for (Player p : match.onlineMembers()) p.sendActionBar(actionBar);
+            return;
+        }
+
+        Component subtitle = Component.text(
+                match.countdownType == Match.CountdownType.START ? "Match starts in..." : "Second half starts in...",
+                NamedTextColor.GRAY);
         Title title = Title.title(
-                Component.text(String.valueOf(match.secondsLeft), NamedTextColor.GOLD, TextDecoration.BOLD),
-                Component.text("Second half starts in...", NamedTextColor.GRAY),
+                Component.text(String.valueOf(n), NamedTextColor.GOLD, TextDecoration.BOLD),
+                subtitle,
                 Title.Times.times(Duration.ZERO, Duration.ofMillis(900), Duration.ofMillis(100)));
         for (Player p : match.onlineMembers()) p.showTitle(title);
+    }
+
+    private void cancelTasks(Match match) {
+        if (match.timerTask != null) match.timerTask.cancel();
+        if (match.countdownTask != null) match.countdownTask.cancel();
+    }
+
+    // ------------------------------------------------------------------ team jerseys
+
+    private ItemStack createJersey(Team team) {
+        ItemStack item = new ItemStack(Material.LEATHER_CHESTPLATE);
+        LeatherArmorMeta meta = (LeatherArmorMeta) item.getItemMeta();
+        meta.setColor(Color.fromRGB(team.color.value()));
+        meta.displayName(Component.text(team.label + " Team Jersey", team.color, TextDecoration.BOLD)
+                .decoration(TextDecoration.ITALIC, false));
+        meta.setUnbreakable(true);
+        meta.getPersistentDataContainer().set(jerseyKey, PersistentDataType.BYTE, (byte) 1);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private boolean isJersey(ItemStack item) {
+        return item != null && item.hasItemMeta()
+                && item.getItemMeta().getPersistentDataContainer().has(jerseyKey, PersistentDataType.BYTE);
+    }
+
+    /** Equips the team jersey, remembering whatever chestplate the player was wearing. */
+    private void giveJersey(Match match, Player player) {
+        ItemStack current = player.getInventory().getChestplate();
+        match.savedChestplates.putIfAbsent(player.getUniqueId(),
+                current == null || isJersey(current) ? new ItemStack(Material.AIR) : current);
+        player.getInventory().setChestplate(createJersey(match.teamOf(player.getUniqueId())));
+    }
+
+    private void restoreChestplate(Match match, Player player) {
+        ItemStack saved = match.savedChestplates.remove(player.getUniqueId());
+        if (saved == null) return;
+        player.getInventory().setChestplate(saved.getType() == Material.AIR ? null : saved);
+    }
+
+    /** Players can't take the jersey off or swap it out during a match. */
+    @EventHandler
+    public void onJerseyClick(InventoryClickEvent event) {
+        if (!(event.getWhoClicked() instanceof Player player)) return;
+        Match match = matchByPlayer.get(player.getUniqueId());
+        if (match == null || !match.savedChestplates.containsKey(player.getUniqueId())) return;
+
+        boolean chestSlot = event.getSlotType() == InventoryType.SlotType.ARMOR && event.getSlot() == 38;
+        if (chestSlot || isJersey(event.getCurrentItem())) {
+            event.setCancelled(true);
+        }
+    }
+
+    /** The jersey never drops on death; it comes back when the player respawns. */
+    @EventHandler
+    public void onDeath(PlayerDeathEvent event) {
+        if (matchByPlayer.containsKey(event.getPlayer().getUniqueId())) {
+            event.getDrops().removeIf(this::isJersey);
+        }
+    }
+
+    @EventHandler
+    public void onRespawn(PlayerRespawnEvent event) {
+        Player player = event.getPlayer();
+        Match match = matchByPlayer.get(player.getUniqueId());
+        if (match == null || !match.savedChestplates.containsKey(player.getUniqueId())) return;
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            if (matchByPlayer.get(player.getUniqueId()) == match) giveJersey(match, player);
+        });
     }
 
     // ------------------------------------------------------------------ cleanup
@@ -592,13 +718,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void removeMember(Match match, Player player) {
+        restoreChestplate(match, player);
         match.remove(player.getUniqueId());
         matchByPlayer.remove(player.getUniqueId());
         match.hideBar(player);
     }
 
     private void endMatch(Match match, String reason) {
-        if (match.timerTask != null) match.timerTask.cancel();
+        cancelTasks(match);
         if (match.ball != null) match.ball.remove();
         Component message = Component.text(reason, NamedTextColor.YELLOW);
 
@@ -613,6 +740,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 .append(resultLine(match));
 
         for (Player p : match.onlineMembers()) {
+            restoreChestplate(match, p);
             match.hideBar(p);
             p.sendMessage(message);
             p.sendMessage(overview);
