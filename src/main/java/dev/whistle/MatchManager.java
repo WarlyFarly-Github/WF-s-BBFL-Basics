@@ -45,6 +45,7 @@ import org.bukkit.util.Vector;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -56,7 +57,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final int HALF_SECONDS = 5 * 60;   // length of each half
     private static final int COUNTDOWN_SECONDS = 5;   // break between the halves
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "invite", "start", "goal", "end", "leave", "accept", "decline");
+            List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline");
 
     private record Invite(UUID host, Team team, long time) {}
 
@@ -71,17 +72,22 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private final JavaPlugin plugin;
+    private final StadiumManager stadiums;
     private final NamespacedKey ballKey;
     private final NamespacedKey targetKey;
     private final NamespacedKey jerseyKey;
     private final Map<UUID, Match> matchByPlayer = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
 
-    MatchManager(JavaPlugin plugin) {
+    MatchManager(JavaPlugin plugin, StadiumManager stadiums) {
         this.plugin = plugin;
+        this.stadiums = stadiums;
         this.ballKey = new NamespacedKey(plugin, "football");
         this.targetKey = new NamespacedKey(plugin, "invite_target");
         this.jerseyKey = new NamespacedKey(plugin, "jersey");
+
+        // Checks for the ball entering a goal area every 2 ticks.
+        Bukkit.getScheduler().runTaskTimer(plugin, this::checkGoals, 2L, 2L);
     }
 
     /** Removes every ball on shutdown so none are left behind. */
@@ -102,7 +108,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /match <create|invite|start|goal|end|leave|accept|decline>");
+            error(player, "Usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline>");
             return true;
         }
 
@@ -112,6 +118,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 Match match = hostedMatch(player);
                 if (match != null) openInviteGui(player);
             }
+            case "stadium" -> chooseStadium(player, args);
             case "start" -> start(player);
             case "goal" -> goal(player, args);
             case "end" -> {
@@ -121,7 +128,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case "leave" -> leave(player);
             case "accept" -> accept(player);
             case "decline" -> decline(player);
-            default -> error(player, "Unknown subcommand. Use /match <create|invite|start|goal|end|leave|accept|decline>");
+            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|start|goal|end|leave|accept|decline>");
         }
         return true;
     }
@@ -133,6 +140,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("goal")) {
             return List.of("red", "blue");
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("stadium")) {
+            return stadiums.names().stream().filter(n -> n.toLowerCase().startsWith(args[1].toLowerCase())).toList();
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("create") && sender.hasPermission("wfsbbrl.bypass")) {
             return List.of("bypass");
@@ -222,18 +232,20 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
         Team team = args[1].equalsIgnoreCase("red") ? Team.RED : Team.BLUE;
+        String scorer = args.length >= 3 ? args[2] : lastScorerName(match);
+        scoreGoal(match, team, scorer);
+    }
 
-        // Scorer: the name given, otherwise whoever last kicked the ball, otherwise the host.
-        String scorer;
-        if (args.length >= 3) {
-            scorer = args[2];
-        } else if (match.lastKicker != null) {
-            OfflinePlayer kicker = Bukkit.getOfflinePlayer(match.lastKicker);
-            scorer = kicker.getName() != null ? kicker.getName() : "Unknown";
-        } else {
-            scorer = host.getName();
-        }
+    /** Whoever last kicked the ball, otherwise the host. */
+    private String lastScorerName(Match match) {
+        UUID id = match.lastKicker != null ? match.lastKicker : match.host;
+        String name = Bukkit.getOfflinePlayer(id).getName();
+        return name != null ? name : "Unknown";
+    }
 
+    /** Adds the goal, shows the title and starts the 5 second freeze. */
+    private void scoreGoal(Match match, Team team, String scorer) {
+        if (match.phase == Match.Phase.COUNTDOWN) return;
         match.addGoal(team);
 
         // The title stays up for the whole freeze; the countdown itself runs on the action bar.
@@ -246,6 +258,56 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         beginCountdown(match, Match.CountdownType.GOAL, match.phase);
+    }
+
+    /** Detects the ball entering a goal area of the match's stadium. */
+    private void checkGoals() {
+        for (Match match : new LinkedHashSet<>(matchByPlayer.values())) {
+            if (!match.started || match.phase == Match.Phase.COUNTDOWN || match.stadium == null) continue;
+            SulfurCube ball = match.ball;
+            if (ball == null || !ball.isValid()) continue;
+
+            Location ballCenter = ball.getBoundingBox().getCenter().toLocation(ball.getWorld());
+            for (Team defending : Team.values()) {
+                if (match.stadium.goalContains(defending, ballCenter)) {
+                    Team scoring = defending == Team.RED ? Team.BLUE : Team.RED;
+                    scoreGoal(match, scoring, lastScorerName(match));
+                    break;
+                }
+            }
+        }
+    }
+
+    private void chooseStadium(Player host, String[] args) {
+        Match match = hostedMatch(host);
+        if (match == null) return;
+        if (args.length < 2) {
+            error(host, "Usage: /match stadium <name>");
+            return;
+        }
+        Stadium stadium = stadiums.get(args[1]);
+        if (stadium == null) {
+            error(host, "No stadium called " + args[1] + ".");
+            return;
+        }
+        match.stadium = stadium;
+        host.sendMessage(Component.text("Stadium set to " + stadium.name + ".", NamedTextColor.GREEN));
+        if (!stadium.hasCenter()) {
+            host.sendMessage(Component.text("It has no centre point yet, so the ball will use your start position.",
+                    NamedTextColor.YELLOW));
+        }
+        for (Team team : Team.values()) {
+            if (!stadium.goalComplete(team)) {
+                host.sendMessage(Component.text("The " + team.label
+                        + " goal isn't set up yet, so goals there won't be detected.", NamedTextColor.YELLOW));
+            }
+        }
+    }
+
+    /** Where the ball is placed during freezes: the stadium centre if there is one. */
+    private Location ballSpawnPoint(Match match) {
+        if (match.stadium != null && match.stadium.hasCenter()) return match.stadium.center.clone();
+        return match.ballStart;
     }
 
     private void leave(Player player) {
@@ -555,7 +617,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         match.countdownLeft = COUNTDOWN_SECONDS;
 
         // After a goal or at half time, everyone (and the ball) goes back to the start positions.
-        if (type != Match.CountdownType.START) resetPositions(match);
+        if (type != Match.CountdownType.START) {
+            resetPositions(match);
+        } else if (match.stadium != null && match.stadium.hasCenter()) {
+            spawnBall(match, match.stadium.center.clone());
+        }
         freezeBall(match);
         showCountdown(match);
 
@@ -575,7 +641,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             Location start = match.startPositions.get(p.getUniqueId());
             if (start != null) p.teleport(start);
         }
-        if (match.ballStart != null) spawnBall(match, match.ballStart);
+        Location ballSpawn = ballSpawnPoint(match);
+        if (ballSpawn != null) spawnBall(match, ballSpawn);
     }
 
     private void endCountdown(Match match) {

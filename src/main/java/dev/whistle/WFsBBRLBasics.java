@@ -37,7 +37,14 @@ public final class WFsBBRLBasics extends JavaPlugin implements Listener {
         whistleKey = new NamespacedKey(this, "whistle");
         getServer().getPluginManager().registerEvents(this, this);
 
-        matches = new MatchManager(this);
+        StadiumManager stadiums = new StadiumManager(this);
+        PluginCommand stadiumCommand = getCommand("stadium");
+        if (stadiumCommand != null) {
+            stadiumCommand.setExecutor(stadiums);
+            stadiumCommand.setTabCompleter(stadiums);
+        }
+
+        matches = new MatchManager(this, stadiums);
         getServer().getPluginManager().registerEvents(matches, this);
         PluginCommand matchCommand = getCommand("match");
         if (matchCommand != null) {

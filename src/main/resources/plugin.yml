@@ -12,8 +12,11 @@ commands:
     permission: whistle.give
   match:
     description: Create and manage football matches.
-    usage: /match <create|invite|start|goal|end|leave|accept|decline>
+    usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline>
     permission: wfsbbrl.match
+  stadium:
+    description: Create stadiums, set centre points and goal areas.
+    usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight>
 permissions:
   whistle.give:
     description: Allows use of /whistle
@@ -23,4 +26,7 @@ permissions:
     default: true
   wfsbbrl.bypass:
     description: Allows /match create bypass (create a match with nobody else online)
+    default: op
+  wfsbbrl.stadium:
+    description: Allows /stadium without the LuckPerms builder role
     default: op
