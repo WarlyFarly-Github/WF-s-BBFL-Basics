@@ -474,14 +474,36 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (match.ball != null) match.ball.remove();
         Component message = Component.text(reason, NamedTextColor.YELLOW);
 
+        Component overview = Component.text("Overview:", NamedTextColor.GOLD, TextDecoration.BOLD)
+                .appendNewline()
+                .append(Component.text("Red Team: ", NamedTextColor.RED)
+                        .append(Component.text(match.redScore, NamedTextColor.WHITE)))
+                .appendNewline()
+                .append(Component.text("Blue Team: ", NamedTextColor.BLUE)
+                        .append(Component.text(match.blueScore, NamedTextColor.WHITE)))
+                .appendNewline()
+                .append(resultLine(match));
+
         for (Player p : match.onlineMembers()) {
             match.hideBar(p);
             p.sendMessage(message);
+            p.sendMessage(overview);
         }
         for (UUID id : new ArrayList<>(matchByPlayer.keySet())) {
             if (matchByPlayer.get(id) == match) matchByPlayer.remove(id);
         }
         invites.values().removeIf(invite -> invite.host().equals(match.host));
+    }
+
+    private Component resultLine(Match match) {
+        int diff = Math.abs(match.redScore - match.blueScore);
+        if (diff == 0) {
+            return Component.text("The match ended in a draw!", NamedTextColor.YELLOW, TextDecoration.BOLD);
+        }
+        Team winner = match.redScore > match.blueScore ? Team.RED : Team.BLUE;
+        return Component.text(winner.label, winner.color, TextDecoration.BOLD)
+                .append(Component.text(" has won by " + diff + (diff == 1 ? " goal!" : " goals!"),
+                        NamedTextColor.YELLOW, TextDecoration.BOLD));
     }
 
     private void error(Player player, String message) {
