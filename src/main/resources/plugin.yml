@@ -21,3 +21,6 @@ permissions:
   wfsbbrl.match:
     description: Allows use of /match
     default: true
+  wfsbbrl.bypass:
+    description: Allows /match create bypass (create a match with nobody else online)
+    default: op

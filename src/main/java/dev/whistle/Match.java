@@ -37,6 +37,7 @@ final class Match {
     int blueScore;
     boolean started;
     SulfurCube ball;
+    UUID lastKicker; // last match member to hit the ball
 
     private final Set<UUID> red = new LinkedHashSet<>();
     private final Set<UUID> blue = new LinkedHashSet<>();

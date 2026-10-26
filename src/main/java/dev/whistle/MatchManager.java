@@ -5,9 +5,11 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
+import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
 import org.bukkit.Material;
+import org.bukkit.OfflinePlayer;
 import org.bukkit.NamespacedKey;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -91,7 +93,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         switch (args[0].toLowerCase()) {
-            case "create" -> create(player);
+            case "create" -> create(player, args);
             case "invite" -> {
                 Match match = hostedMatch(player);
                 if (match != null) openInviteGui(player);
@@ -118,17 +120,37 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (args.length == 2 && args[0].equalsIgnoreCase("goal")) {
             return List.of("red", "blue");
         }
+        if (args.length == 2 && args[0].equalsIgnoreCase("create") && sender.hasPermission("wfsbbrl.bypass")) {
+            return List.of("bypass");
+        }
+        if (args.length == 3 && args[0].equalsIgnoreCase("goal")) {
+            return Bukkit.getOnlinePlayers().stream().map(Player::getName)
+                    .filter(n -> n.toLowerCase().startsWith(args[2].toLowerCase())).toList();
+        }
         return List.of();
     }
 
-    private void create(Player host) {
+    private void create(Player host, String[] args) {
+        boolean bypass = false;
+        if (args.length >= 2) {
+            if (!args[1].equalsIgnoreCase("bypass")) {
+                error(host, "Usage: /match create" + (host.hasPermission("wfsbbrl.bypass") ? " [bypass]" : ""));
+                return;
+            }
+            if (!host.hasPermission("wfsbbrl.bypass")) {
+                error(host, "You don't have permission to bypass.");
+                return;
+            }
+            bypass = true;
+        }
+
         if (matchByPlayer.containsKey(host.getUniqueId())) {
             error(host, "You are already in a match! Use /match leave first.");
             return;
         }
         boolean othersOnline = Bukkit.getOnlinePlayers().stream()
                 .anyMatch(p -> !p.getUniqueId().equals(host.getUniqueId()));
-        if (!othersOnline) {
+        if (!othersOnline && !bypass) {
             error(host, "There are no other players online!");
             return;
         }
@@ -138,7 +160,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         host.sendMessage(Component.text("Match created! You are on the ", NamedTextColor.GREEN)
                 .append(Component.text("Red", NamedTextColor.RED, TextDecoration.BOLD))
                 .append(Component.text(" team. Use /match start to kick off.", NamedTextColor.GREEN)));
-        openInviteGui(host);
+
+        if (othersOnline) {
+            openInviteGui(host);
+        } else {
+            host.sendMessage(Component.text("Bypass used: nobody else is online, so there is no invite GUI.",
+                    NamedTextColor.YELLOW));
+        }
     }
 
     private void start(Player host) {
@@ -165,14 +193,30 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
         if (args.length < 2 || !(args[1].equalsIgnoreCase("red") || args[1].equalsIgnoreCase("blue"))) {
-            error(host, "Usage: /match goal <red|blue>");
+            error(host, "Usage: /match goal <red|blue> [player]");
             return;
         }
         Team team = args[1].equalsIgnoreCase("red") ? Team.RED : Team.BLUE;
+
+        // Scorer: the name given, otherwise whoever last kicked the ball, otherwise the host.
+        String scorer;
+        if (args.length >= 3) {
+            scorer = args[2];
+        } else if (match.lastKicker != null) {
+            OfflinePlayer kicker = Bukkit.getOfflinePlayer(match.lastKicker);
+            scorer = kicker.getName() != null ? kicker.getName() : "Unknown";
+        } else {
+            scorer = host.getName();
+        }
+
         match.addGoal(team);
-        match.broadcast(Component.text("GOAL for the ", NamedTextColor.YELLOW)
-                .append(Component.text(team.label + " team", team.color, TextDecoration.BOLD))
-                .append(Component.text("!", NamedTextColor.YELLOW)));
+
+        Title title = Title.title(
+                Component.text(team.label + " Goal!", team.color, TextDecoration.BOLD),
+                Component.text("Scored by " + scorer, NamedTextColor.WHITE));
+        for (Player p : match.onlineMembers()) {
+            p.showTitle(title);
+        }
     }
 
     private void leave(Player player) {
@@ -384,6 +428,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             if (direction.lengthSquared() < 1.0E-4) {
                 direction = new Vector(0, 0, 1);
             }
+            Match kickerMatch = matchByPlayer.get(kicker.getUniqueId());
+            if (kickerMatch != null) kickerMatch.lastKicker = kicker.getUniqueId();
             double power = kicker.isSprinting() ? 1.5 : 1.0;
             Vector velocity = direction.normalize().multiply(power).setY(0.35);
             event.getEntity().setVelocity(velocity);
