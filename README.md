@@ -72,7 +72,7 @@ Stadium configurations are stored in `stadiums.yml`.
 
 ## Development Status
 
-The initial whistle implementation is complete. The match system, stadiums, GUIs, and newer features still require compilation and testing.
+The plugin is being actively developed, and hasn't got a fully finished "1.0" yet, hence why there are no builds. We are working to get this done ASAP!
 
 **Developer:** WarlyFarly  
 **Server:** BBFL  
