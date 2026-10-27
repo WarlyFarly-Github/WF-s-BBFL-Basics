@@ -94,6 +94,47 @@ final class Stadium {
         return true;
     }
 
+    /** True once the bounds polygon has at least 3 points, all in one world: only then do matches use it. */
+    boolean hasBounds() {
+        if (bounds.size() < 3) return false;
+        World world = bounds.get(0).getWorld();
+        if (world == null) return false;
+        for (Location point : bounds) {
+            if (!world.equals(point.getWorld())) return false;
+        }
+        return true;
+    }
+
+    /** Whether the point is inside the bounds polygon (height is ignored). */
+    boolean boundsContain(Location point) {
+        if (!hasBounds() || !bounds.get(0).getWorld().equals(point.getWorld())) return false;
+
+        int n = bounds.size();
+        double[] xs = new double[n];
+        double[] zs = new double[n];
+        for (int i = 0; i < n; i++) {
+            xs[i] = bounds.get(i).getBlockX() + 0.5;
+            zs[i] = bounds.get(i).getBlockZ() + 0.5;
+        }
+        double px = point.getX();
+        double pz = point.getZ();
+
+        // Like the goals: within half a block of the line counts as inside.
+        for (int i = 0; i < n; i++) {
+            int j = (i + 1) % n;
+            if (distanceToSegment(px, pz, xs[i], zs[i], xs[j], zs[j]) <= 0.5) return true;
+        }
+
+        boolean inside = false;
+        for (int i = 0, j = n - 1; i < n; j = i++) {
+            boolean crosses = (zs[i] > pz) != (zs[j] > pz);
+            if (crosses && px < (xs[j] - xs[i]) * (pz - zs[i]) / (zs[j] - zs[i]) + xs[i]) {
+                inside = !inside;
+            }
+        }
+        return inside;
+    }
+
     /** Whether the point is inside the goal area defended by the given team. */
     boolean goalContains(Team team, Location point) {
         if (!goalComplete(team)) return false;

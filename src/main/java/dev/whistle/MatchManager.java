@@ -361,13 +361,37 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             if (ball == null || !ball.isValid()) continue;
 
             Location ballCenter = ball.getBoundingBox().getCenter().toLocation(ball.getWorld());
+            boolean scored = false;
             for (Team defending : Team.values()) {
                 if (match.stadium.goalContains(defending, ballCenter)) {
                     Team scoring = defending == Team.RED ? Team.BLUE : Team.RED;
                     scoreGoal(match, scoring, lastScorerName(match));
+                    scored = true;
                     break;
                 }
             }
+            if (scored) continue; // goals win over the bounds, so goals just outside the bounds still count
+
+            if (match.stadium.hasBounds()) {
+                if (match.stadium.boundsContain(ballCenter)) {
+                    match.lastInBounds = ball.getLocation().clone();
+                } else {
+                    returnBallToBounds(match, ball);
+                }
+            }
+        }
+    }
+
+    /** The ball left the stadium bounds: put it back where it was last inside, standing still. */
+    private void returnBallToBounds(Match match, SulfurCube ball) {
+        Location back = match.lastInBounds;
+        if (back == null && match.stadium.hasCenter()) back = match.stadium.center.clone();
+        if (back == null) return;
+
+        ball.teleport(back.clone());
+        ball.setVelocity(new Vector(0, 0, 0));
+        for (Player p : match.onlineMembers()) {
+            p.sendActionBar(Component.text("Out of bounds!", NamedTextColor.YELLOW, TextDecoration.BOLD));
         }
     }
 
@@ -391,6 +415,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         host.sendMessage(Component.text("Stadium set to " + stadium.name + ".", NamedTextColor.GREEN));
         if (!stadium.hasCenter()) {
             host.sendMessage(Component.text("It has no centre point yet, so the ball will use your start position.",
+                    NamedTextColor.YELLOW));
+        }
+        if (!stadium.hasBounds()) {
+            host.sendMessage(Component.text("It has no bounds (3 or more points) yet, so the ball can leave the pitch.",
                     NamedTextColor.YELLOW));
         }
         for (Team team : Team.values()) {
@@ -809,6 +837,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private void spawnBall(Match match, Location location) {
         if (match.ball != null) match.ball.remove();
+        match.lastInBounds = null; // a fresh ball has not been seen inside the bounds yet
 
         match.ball = location.getWorld().spawn(location, SulfurCube.class, cube -> {
             cube.setSize(2);
@@ -941,7 +970,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         freezeBall(match);
         showCountdown(match);
-        playFreezeSound(match, 1.0f); // freeze starts
+        playFreezeSound(match, 1.0f); // 5
 
         match.countdownTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
             match.countdownLeft--;
@@ -950,6 +979,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 endCountdown(match);
             } else {
                 showCountdown(match);
+                playFreezeSound(match, 1.0f); // a ding every second: 5 (when it starts), 4, 3, 2, 1
             }
         }, 20L, 20L);
     }

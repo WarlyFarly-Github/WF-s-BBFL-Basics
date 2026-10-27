@@ -49,6 +49,7 @@ final class Match {
     SulfurCube ball;
     Stadium stadium; // optional: gives the match a centre point and goal areas
     UUID lastKicker; // last match member to hit the ball
+    Location lastInBounds; // where the ball last was inside the stadium bounds (null until it has been seen there)
 
     // Match timer
     Phase phase = Phase.FIRST_HALF;          // COUNTDOWN means everything is frozen
