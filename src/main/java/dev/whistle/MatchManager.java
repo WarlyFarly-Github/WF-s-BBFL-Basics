@@ -2,6 +2,8 @@ package dev.whistle;
 
 import dev.whistle.Match.Team;
 import net.kyori.adventure.bossbar.BossBar;
+import net.kyori.adventure.key.Key;
+import net.kyori.adventure.sound.Sound;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
@@ -926,6 +928,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         freezeBall(match);
         showCountdown(match);
+        playFreezeSound(match, 1.0f); // freeze starts
 
         match.countdownTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
             match.countdownLeft--;
@@ -960,6 +963,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         Title title = Title.title(
                 Component.text("Kick off!", NamedTextColor.GREEN, TextDecoration.BOLD), subtitle);
         for (Player p : match.onlineMembers()) p.showTitle(title);
+        playFreezeSound(match, 2.0f); // freeze ends: one octave higher
+    }
+
+    /** Note block "ding" (the bell). Pitch 1.0 is the normal note, 2.0 is exactly one octave up. */
+    private void playFreezeSound(Match match, float pitch) {
+        Sound ding = Sound.sound(Key.key("block.note_block.bell"), Sound.Source.MASTER, 1.0f, pitch);
+        for (Player p : match.onlineMembers()) p.playSound(ding);
     }
 
     private void updateTimerBar(Match match) {
