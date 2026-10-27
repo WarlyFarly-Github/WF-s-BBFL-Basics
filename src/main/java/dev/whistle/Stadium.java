@@ -62,6 +62,21 @@ final class Stadium {
         }
     }
 
+    /** Everything a stadium needs before it can be used in a match; empty means it is finished. */
+    List<String> missingParts() {
+        List<String> missing = new ArrayList<>();
+        if (!hasCenter()) missing.add("centre point");
+        for (Team team : Team.values()) {
+            if (!goalComplete(team)) missing.add(team.label + " goal (all 4 corners)");
+        }
+        if (!hasBounds()) missing.add("bounds (at least 3 points)");
+        return missing;
+    }
+
+    boolean isComplete() {
+        return missingParts().isEmpty();
+    }
+
     boolean hasCenter() {
         return center != null && center.getWorld() != null;
     }

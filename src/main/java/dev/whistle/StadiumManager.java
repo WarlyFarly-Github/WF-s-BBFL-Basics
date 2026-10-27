@@ -16,6 +16,9 @@ import org.bukkit.command.TabCompleter;
 import org.bukkit.configuration.ConfigurationSection;
 import org.bukkit.configuration.file.YamlConfiguration;
 import org.bukkit.entity.Player;
+import org.bukkit.event.EventHandler;
+import org.bukkit.event.Listener;
+import org.bukkit.event.player.PlayerJoinEvent;
 import org.bukkit.plugin.java.JavaPlugin;
 
 import java.io.File;
@@ -30,7 +33,7 @@ import java.util.logging.Level;
 import java.util.regex.Pattern;
 
 /** Handles /stadium and saves stadiums to plugins/WFs_BBFL_Basics/stadiums.yml. */
-final class StadiumManager implements CommandExecutor, TabCompleter {
+final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
 
     private static final Pattern VALID_NAME = Pattern.compile("[A-Za-z0-9_-]{1,32}");
     private static final List<String> SUBCOMMANDS =
@@ -225,6 +228,8 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
         int points = stadium.bounds.size();
         player.sendMessage(statusLine("Bounds", points == 0 ? null
                 : points + " point" + (points == 1 ? "" : "s") + (points < 3 ? " (needs at least 3 to make a shape)" : "")));
+        List<String> notReady = stadium.missingParts();
+        player.sendMessage(statusLine("Ready for matches", notReady.isEmpty() ? "yes" : null));
         player.sendMessage(statusLine("Centre point", stadium.hasCenter() ? describe(stadium.center) : null));
         for (Team team : Team.values()) {
             String value = null;
@@ -572,6 +577,11 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
         save();
         player.sendMessage(Component.text("You now own " + stadium.name + ". Use /stadium edit " + stadium.name
                 + " to change it, and /stadium invite to let others help.", NamedTextColor.GREEN));
+        List<String> missing = stadium.missingParts();
+        if (!missing.isEmpty()) {
+            player.sendMessage(Component.text("It still needs: " + String.join(", ", missing)
+                    + " before it can be used in matches.", NamedTextColor.YELLOW));
+        }
     }
 
     /**
@@ -600,12 +610,28 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
     }
 
     private List<String> missingParts(Stadium stadium) {
-        List<String> missing = new ArrayList<>();
-        if (!stadium.hasCenter()) missing.add("centre point");
-        for (Team team : Team.values()) {
-            if (!stadium.goalComplete(team)) missing.add(team.label + " goal (all 4 corners)");
+        return stadium.missingParts();
+    }
+
+    /** Owners are reminded on every join until each of their stadiums has everything it needs. */
+    @EventHandler
+    public void onJoin(PlayerJoinEvent event) {
+        Player player = event.getPlayer();
+        plugin.getServer().getScheduler().runTaskLater(plugin, () -> remindOwner(player), 60L); // after the join spam
+    }
+
+    private void remindOwner(Player player) {
+        if (!player.isOnline()) return;
+        for (Stadium stadium : stadiums.values()) {
+            if (!player.getUniqueId().equals(stadium.owner)) continue;
+            List<String> missing = stadium.missingParts();
+            if (missing.isEmpty()) continue;
+            player.sendMessage(Component.text("Your stadium ", NamedTextColor.YELLOW)
+                    .append(Component.text(stadium.name, NamedTextColor.GOLD))
+                    .append(Component.text(" can't be used in matches yet. Still needed: ", NamedTextColor.YELLOW))
+                    .append(Component.text(String.join(", ", missing), NamedTextColor.RED))
+                    .append(Component.text(". Use /stadium edit " + stadium.name + " to finish it.", NamedTextColor.YELLOW)));
         }
-        return missing;
     }
 
     /** The stadium named in args[1], or else the one this player last worked on. */

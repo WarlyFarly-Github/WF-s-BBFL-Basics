@@ -255,6 +255,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (match.stadium == null) {
             return "You must choose a stadium before starting (Change Stadium, or /match stadium <name>).";
         }
+        if (!match.stadium.isComplete()) {
+            return "The stadium " + match.stadium.name + " isn't finished (still needs: "
+                    + String.join(", ", match.stadium.missingParts()) + "). Choose another stadium.";
+        }
         int red = match.size(Team.RED);
         int blue = match.size(Team.BLUE);
         if (!match.started && !match.bypass && (red == 0 || blue == 0)) {
@@ -411,22 +415,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void applyStadium(Player host, Match match, Stadium stadium) {
+        List<String> missing = stadium.missingParts();
+        if (!missing.isEmpty()) {
+            error(host, stadium.name + " isn't finished, so it can't be used yet. It still needs: "
+                    + String.join(", ", missing) + ".");
+            return;
+        }
         match.stadium = stadium;
         host.sendMessage(Component.text("Stadium set to " + stadium.name + ".", NamedTextColor.GREEN));
-        if (!stadium.hasCenter()) {
-            host.sendMessage(Component.text("It has no centre point yet, so the ball will use your start position.",
-                    NamedTextColor.YELLOW));
-        }
-        if (!stadium.hasBounds()) {
-            host.sendMessage(Component.text("It has no bounds (3 or more points) yet, so the ball can leave the pitch.",
-                    NamedTextColor.YELLOW));
-        }
-        for (Team team : Team.values()) {
-            if (!stadium.goalComplete(team)) {
-                host.sendMessage(Component.text("The " + team.label
-                        + " goal isn't set up yet, so goals there won't be detected.", NamedTextColor.YELLOW));
-            }
-        }
     }
 
     /** Where the ball is placed during freezes: the stadium centre if there is one. */
@@ -661,8 +657,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 statusLore("Centre point", stadium.hasCenter()),
                 statusLore("Red goal", stadium.goalComplete(Team.RED)),
                 statusLore("Blue goal", stadium.goalComplete(Team.BLUE)),
+                statusLore("Bounds", stadium.hasBounds()),
                 Component.empty(),
-                plain("Click to select", NamedTextColor.YELLOW)));
+                stadium.isComplete() ? plain("Click to select", NamedTextColor.YELLOW)
+                        : plain("Not finished: can't be used yet", NamedTextColor.RED)));
         meta.getPersistentDataContainer().set(stadiumKey, PersistentDataType.STRING, stadium.name);
         item.setItemMeta(meta);
         return item;
