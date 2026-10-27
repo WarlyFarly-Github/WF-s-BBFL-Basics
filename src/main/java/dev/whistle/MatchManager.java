@@ -28,6 +28,7 @@ import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.ExplosionPrimeEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryType;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
@@ -63,7 +64,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final int HALF_SECONDS = 5 * 60;   // length of each half
     private static final int COUNTDOWN_SECONDS = 5;   // break between the halves
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "menu", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline");
+            List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline");
 
     private record Invite(UUID host, Team team, long time) {}
 
@@ -143,18 +144,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /match <create|menu|invite|stadium|start|goal|end|leave|accept|decline>");
+            error(player, "Usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline>");
             return true;
         }
 
         switch (args[0].toLowerCase()) {
             case "create" -> create(player, args);
-            case "menu" -> {
-                Match match = hostedMatch(player);
-                if (match == null) return true;
-                if (match.started) error(player, "The match has already started. Use /match invite to add players.");
-                else openMainMenu(player);
-            }
             case "invite" -> {
                 Match match = hostedMatch(player);
                 if (match != null) openTeamMenu(player);
@@ -169,7 +164,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case "leave" -> leave(player);
             case "accept" -> accept(player);
             case "decline" -> decline(player);
-            default -> error(player, "Unknown subcommand. Use /match <create|menu|invite|stadium|start|goal|end|leave|accept|decline>");
+            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|start|goal|end|leave|accept|decline>");
         }
         return true;
     }
@@ -585,7 +580,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         inventory.setItem(SLOT_PREVIOUS, arrowBanner("Previous Page", false));
-        inventory.setItem(SLOT_PAGE, pageBanner(page, pages));
+        inventory.setItem(SLOT_PAGE, pageMarker(type == MenuType.PLAYERS ? Material.PAPER : Material.WHITE_BANNER, page, pages));
         inventory.setItem(SLOT_NEXT, arrowBanner("Next Page", true));
         inventory.setItem(SLOT_BACK, backButton());
         host.openInventory(inventory);
@@ -603,9 +598,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return item;
     }
 
-    /** Plain white banner whose stack size is the current page number. */
-    private ItemStack pageBanner(int page, int pages) {
-        ItemStack item = new ItemStack(Material.WHITE_BANNER, page);
+    /** Page number item (white banner, or paper in the player menu) whose stack size is the current page. */
+    private ItemStack pageMarker(Material material, int page, int pages) {
+        ItemStack item = new ItemStack(material, page);
         ItemMeta meta = item.getItemMeta();
         meta.displayName(bold("Page Number", NamedTextColor.WHITE));
         meta.lore(List.of(plain("Page " + page + " of " + pages, NamedTextColor.GRAY)));
@@ -741,6 +736,20 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             }
             invite(host, target, menu.team);
         }
+    }
+
+    /** Pressing Escape (or the inventory key) on a menu before the match starts just opens Match Setup again. */
+    @EventHandler
+    public void onMenuClose(InventoryCloseEvent event) {
+        if (!(event.getInventory().getHolder() instanceof MenuGui)) return;
+        if (event.getReason() != InventoryCloseEvent.Reason.PLAYER) return; // ignore closes made by the plugin or server
+        if (!(event.getPlayer() instanceof Player host)) return;
+
+        Match match = menuMatch(host);
+        if (match == null || match.started) return;
+        later(() -> {
+            if (host.isOnline() && menuMatch(host) == match && !match.started) openMainMenu(host);
+        });
     }
 
     @EventHandler

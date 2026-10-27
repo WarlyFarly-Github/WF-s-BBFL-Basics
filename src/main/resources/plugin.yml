@@ -12,7 +12,7 @@ commands:
     permission: whistle.give
   match:
     description: Create and manage football matches.
-    usage: /match <create|menu|invite|stadium|start|goal|end|leave|accept|decline>
+    usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline>
     permission: wfsbbrl.match
   stadium:
     description: Create stadiums, set centre points and goal areas.
