@@ -18,6 +18,7 @@ final class Stadium {
     static final int GOAL_CORNERS = 4;
     static final double DEFAULT_GOAL_HEIGHT = 3.0;
     static final int MAX_BOUNDS_POINTS = 32;
+    static final int POSITIONS_PER_TEAM = 3;
 
     final String name;
 
@@ -51,6 +52,12 @@ final class Stadium {
      */
     final Map<Team, Location[]> goals = new EnumMap<>(Team.class);
 
+    /**
+     * Where each team's players stand during a freeze (setpos1..setpos3). Players are shuffled between these each
+     * freeze. Keyed by team.
+     */
+    final Map<Team, Location[]> positions = new EnumMap<>(Team.class);
+
     /** How many blocks tall each goal is (half blocks allowed), measured up from the lowest corner block. */
     final Map<Team, Double> goalHeights = new EnumMap<>(Team.class);
 
@@ -58,6 +65,7 @@ final class Stadium {
         this.name = name;
         for (Team team : Team.values()) {
             goals.put(team, new Location[GOAL_CORNERS]);
+            positions.put(team, new Location[POSITIONS_PER_TEAM]);
             goalHeights.put(team, DEFAULT_GOAL_HEIGHT);
         }
     }
@@ -68,6 +76,11 @@ final class Stadium {
         if (!hasCenter()) missing.add("centre point");
         for (Team team : Team.values()) {
             if (!goalComplete(team)) missing.add(team.label + " goal (all 4 corners)");
+        }
+        for (Team team : Team.values()) {
+            if (!positionsComplete(team)) {
+                missing.add(team.label + " player positions (" + positionsSet(team) + "/" + POSITIONS_PER_TEAM + ")");
+            }
         }
         if (!hasBounds()) missing.add("bounds (at least 3 points)");
         return missing;
@@ -97,6 +110,18 @@ final class Stadium {
             if (corner != null) count++;
         }
         return count;
+    }
+
+    int positionsSet(Team team) {
+        int count = 0;
+        for (Location spot : positions.get(team)) {
+            if (spot != null && spot.getWorld() != null) count++;
+        }
+        return count;
+    }
+
+    boolean positionsComplete(Team team) {
+        return positionsSet(team) == POSITIONS_PER_TEAM;
     }
 
     boolean goalComplete(Team team) {

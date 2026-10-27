@@ -64,6 +64,9 @@ final class Match {
 
     // Where everyone (and the ball) were when the match started, used to reset after the first half.
     final Map<UUID, Location> startPositions = new HashMap<>();
+
+    /** Which of the team's stadium positions (0-2) each player was put on last freeze, so nobody repeats one. */
+    final Map<UUID, Integer> lastPosition = new HashMap<>();
     Location ballStart;
 
     // Each player's own chestplate, put back when they leave or the match ends.

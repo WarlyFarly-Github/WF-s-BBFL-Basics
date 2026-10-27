@@ -54,6 +54,7 @@ import org.bukkit.util.Vector;
 
 import java.time.Duration;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -658,6 +659,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 statusLore("Red goal", stadium.goalComplete(Team.RED)),
                 statusLore("Blue goal", stadium.goalComplete(Team.BLUE)),
                 statusLore("Bounds", stadium.hasBounds()),
+                statusLore("Player positions", stadium.positionsComplete(Team.RED) && stadium.positionsComplete(Team.BLUE)),
                 Component.empty(),
                 stadium.isComplete() ? plain("Click to select", NamedTextColor.YELLOW)
                         : plain("Not finished: can't be used yet", NamedTextColor.RED)));
@@ -960,12 +962,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         match.resumePhase = resumePhase;
         match.countdownLeft = COUNTDOWN_SECONDS;
 
-        // After a goal or at half time, everyone (and the ball) goes back to the start positions.
-        if (type != Match.CountdownType.START) {
-            resetPositions(match);
-        } else if (match.stadium != null && match.stadium.hasCenter()) {
-            spawnBall(match, match.stadium.center.clone());
-        }
+        // Every freeze (start, goal, half time): players go to their team's stadium positions, the ball to the centre.
+        resetPositions(match);
         freezeBall(match);
         showCountdown(match);
         playFreezeSound(match, 1.0f); // 5
@@ -983,12 +981,65 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void resetPositions(Match match) {
-        for (Player p : match.onlineMembers()) {
-            Location start = match.startPositions.get(p.getUniqueId());
-            if (start != null) p.teleport(start);
-        }
+        teleportToPositions(match);
         Location ballSpawn = ballSpawnPoint(match);
         if (ballSpawn != null) spawnBall(match, ballSpawn);
+    }
+
+    /**
+     * Puts each team's players on that team's stadium positions in a random order. Nobody stands on the same
+     * position they had in the previous freeze. Falls back to where players were at the start if the stadium has
+     * no positions.
+     */
+    private void teleportToPositions(Match match) {
+        for (Team team : Team.values()) {
+            List<Player> players = match.onlineMembers().stream()
+                    .filter(p -> match.teamOf(p.getUniqueId()) == team).toList();
+            if (players.isEmpty()) continue;
+
+            if (match.stadium == null || !match.stadium.positionsComplete(team)) {
+                for (Player p : players) {
+                    Location start = match.startPositions.get(p.getUniqueId());
+                    if (start != null) p.teleport(start);
+                }
+                continue;
+            }
+
+            Location[] spots = match.stadium.positions.get(team);
+            int[] chosen = new int[players.size()];
+            boolean ok = assignSpots(0, players, spots.length, match.lastPosition, new boolean[spots.length], chosen);
+            if (!ok) { // can't avoid a repeat (cannot normally happen); just spread them out
+                List<Integer> order = new ArrayList<>();
+                for (int i = 0; i < spots.length; i++) order.add(i);
+                Collections.shuffle(order);
+                for (int i = 0; i < chosen.length; i++) chosen[i] = order.get(i % order.size());
+            }
+            for (int i = 0; i < players.size(); i++) {
+                Player p = players.get(i);
+                p.teleport(spots[chosen[i]].clone());
+                match.lastPosition.put(p.getUniqueId(), chosen[i]);
+            }
+        }
+    }
+
+    /** Random assignment of players to different spots where nobody gets their previous spot again. */
+    private boolean assignSpots(int index, List<Player> players, int spots, Map<UUID, Integer> last,
+                                boolean[] used, int[] chosen) {
+        if (index == players.size()) return true;
+        Integer previous = last.get(players.get(index).getUniqueId());
+
+        List<Integer> options = new ArrayList<>();
+        for (int s = 0; s < spots; s++) {
+            if (!used[s] && (previous == null || previous != s)) options.add(s);
+        }
+        Collections.shuffle(options);
+        for (int s : options) {
+            used[s] = true;
+            chosen[index] = s;
+            if (assignSpots(index + 1, players, spots, last, used, chosen)) return true;
+            used[s] = false;
+        }
+        return false;
     }
 
     private void endCountdown(Match match) {
