@@ -5,16 +5,27 @@ import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.World;
 
+import java.util.ArrayList;
 import java.util.EnumMap;
+import java.util.LinkedHashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.UUID;
 
 /** A football stadium: a centre point for the ball and one goal area per team. */
 final class Stadium {
 
     static final int GOAL_CORNERS = 4;
     static final double DEFAULT_GOAL_HEIGHT = 3.0;
+    static final int MAX_BOUNDS_POINTS = 32;
 
     final String name;
+
+    /** Who owns the stadium. Null for stadiums from before owners existed: those can be taken with /stadium claim. */
+    UUID owner;
+
+    /** Players the owner invited to edit it too (uuid -> name when invited). */
+    final Map<UUID, String> editors = new LinkedHashMap<>();
 
     /**
      * Confirmed stadiums are locked: no more edits, and no goal particles. New stadiums start unconfirmed
@@ -24,6 +35,12 @@ final class Stadium {
 
     /** The block shown for this stadium in the stadium chest menu; null means the default player head. */
     Material block;
+
+    /**
+     * The stadium bounds: a polygon of block positions, in order around the edge (at least 3 points to count as a
+     * shape). Edited with /stadium bounds.
+     */
+    final List<Location> bounds = new ArrayList<>();
 
     /** Where the ball is placed during the 5 second freezes. */
     Location center;

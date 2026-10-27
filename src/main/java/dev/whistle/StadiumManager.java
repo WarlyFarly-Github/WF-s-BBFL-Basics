@@ -34,7 +34,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
 
     private static final Pattern VALID_NAME = Pattern.compile("[A-Za-z0-9_-]{1,32}");
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "delete", "list", "info", "setcentre", "setgoal", "goalheight", "block", "confirm", "edit");
+            List.of("create", "delete", "list", "info", "setcentre", "setgoal", "goalheight", "block", "confirm", "edit", "invite", "uninvite", "claim", "bounds");
 
     private final JavaPlugin plugin;
     private final File file;
@@ -43,9 +43,11 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
     /** The stadium each builder last worked on, so /stadium confirm and /stadium edit work without a name. */
     private final Map<UUID, String> lastEdited = new HashMap<>();
 
+    private static final List<String> BOUNDS_ACTIONS = List.of("addpoint", "removepoint", "setpoint");
+
     private static final double PARTICLE_VIEW_DISTANCE = 40.0;
     private static final double PARTICLE_SPACING = 0.5;
-    private static final int MAX_POINTS_PER_EDGE = 200;
+    private static final int MAX_POINTS_PER_EDGE = 300;
 
     StadiumManager(JavaPlugin plugin) {
         this.plugin = plugin;
@@ -81,7 +83,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit>");
+            error(player, "Usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds>");
             return true;
         }
 
@@ -96,7 +98,11 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
             case "block" -> setBlock(player, args);
             case "confirm" -> confirm(player, args);
             case "edit" -> edit(player, args);
-            default -> error(player, "Unknown subcommand. Use /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit>");
+            case "invite" -> invite(player, args);
+            case "uninvite" -> uninvite(player, args);
+            case "claim" -> claim(player, args);
+            case "bounds" -> bounds(player, args);
+            default -> error(player, "Unknown subcommand. Use /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds>");
         }
         return true;
     }
@@ -109,8 +115,42 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
             return filter(SUBCOMMANDS, args[0]);
         }
         String sub = args[0].toLowerCase();
-        if (args.length == 2 && List.of("delete", "info", "setcentre", "setgoal", "goalheight", "block", "confirm", "edit").contains(sub)) {
+        if (sub.equals("bounds")) {
+            if (args.length == 2) {
+                List<String> options = new ArrayList<>(names());
+                options.addAll(BOUNDS_ACTIONS);
+                return filter(options, args[1]);
+            }
+            Stadium named = get(args[1]);
+            if (args.length == 3 && named != null) return filter(BOUNDS_ACTIONS, args[2]);
+            // point numbers for removepoint / setpoint
+            Stadium target = named;
+            String action = named != null ? args[2].toLowerCase() : args[1].toLowerCase();
+            boolean numberSlot = named != null ? args.length == 4 : args.length == 3;
+            if (target == null) {
+                String last = lastEdited.get(player.getUniqueId());
+                target = last == null ? null : stadiums.get(last);
+            }
+            if (numberSlot && target != null && (action.equals("removepoint") || action.equals("setpoint"))) {
+                List<String> numbers = new ArrayList<>();
+                for (int i = 1; i <= target.bounds.size(); i++) numbers.add(String.valueOf(i));
+                return filter(numbers, args[args.length - 1]);
+            }
+            return List.of();
+        }
+        if (args.length == 2 && sub.equals("claim")) {
+            return filter(stadiums.values().stream().filter(s -> s.owner == null).map(s -> s.name).toList(), args[1]);
+        }
+        if (args.length == 2 && List.of("delete", "info", "setcentre", "setgoal", "goalheight", "block", "confirm", "edit",
+                "invite", "uninvite").contains(sub)) {
             return filter(names(), args[1]);
+        }
+        if (args.length == 3 && sub.equals("invite")) {
+            return filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), args[2]);
+        }
+        if (args.length == 3 && sub.equals("uninvite")) {
+            Stadium stadium = get(args[1]);
+            return stadium == null ? List.of() : filter(new ArrayList<>(stadium.editors.values()), args[2]);
         }
         if (args.length == 3 && (sub.equals("setgoal") || sub.equals("goalheight"))) {
             return filter(List.of("red", "blue"), args[2]);
@@ -142,6 +182,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
             return;
         }
         Stadium created = new Stadium(name);
+        created.owner = player.getUniqueId();
         stadiums.put(name.toLowerCase(), created);
         startEditing(player, created);
         save();
@@ -153,7 +194,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
 
     private void delete(Player player, String[] args) {
         Stadium stadium = requireStadium(player, args, "delete");
-        if (stadium == null) return;
+        if (stadium == null || !requireOwner(player, stadium)) return;
         stadiums.remove(stadium.name.toLowerCase());
         save();
         player.sendMessage(Component.text("Deleted stadium " + stadium.name + ".", NamedTextColor.YELLOW));
@@ -164,8 +205,10 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
             player.sendMessage(Component.text("There are no stadiums yet. Use /stadium create <name>.", NamedTextColor.YELLOW));
             return;
         }
+        List<String> labels = stadiums.values().stream()
+                .map(s -> s.owner == null ? s.name + " (unclaimed)" : s.name).toList();
         player.sendMessage(Component.text("Stadiums: ", NamedTextColor.GOLD)
-                .append(Component.text(String.join(", ", names()), NamedTextColor.WHITE)));
+                .append(Component.text(String.join(", ", labels), NamedTextColor.WHITE)));
     }
 
     private void info(Player player, String[] args) {
@@ -173,8 +216,15 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
         if (stadium == null) return;
 
         player.sendMessage(Component.text("Stadium " + stadium.name, NamedTextColor.GOLD));
+        player.sendMessage(statusLine("Owner", stadium.owner == null ? "unclaimed (use /stadium claim " + stadium.name + ")" : ownerName(stadium)));
+        if (!stadium.editors.isEmpty()) {
+            player.sendMessage(statusLine("Invited editors", String.join(", ", stadium.editors.values())));
+        }
         player.sendMessage(statusLine("Status", stadium.confirmed ? "confirmed (locked)" : "editing (goal particles shown)"));
         player.sendMessage(statusLine("Menu block", stadium.block == null ? "player head (default)" : stadium.block.name()));
+        int points = stadium.bounds.size();
+        player.sendMessage(statusLine("Bounds", points == 0 ? null
+                : points + " point" + (points == 1 ? "" : "s") + (points < 3 ? " (needs at least 3 to make a shape)" : "")));
         player.sendMessage(statusLine("Centre point", stadium.hasCenter() ? describe(stadium.center) : null));
         for (Team team : Team.values()) {
             String value = null;
@@ -300,12 +350,228 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
 
     /** Refuses (and explains) if the stadium is confirmed; otherwise remembers it as the one being worked on. */
     private boolean requireEditable(Player player, Stadium stadium) {
+        if (!requireAccess(player, stadium)) return false;
         if (stadium.confirmed) {
             error(player, stadium.name + " is confirmed and locked. Use /stadium edit " + stadium.name + " to change it.");
             return false;
         }
         startEditing(player, stadium);
         return true;
+    }
+
+    /** /stadium bounds [stadium] <addpoint|removepoint|setpoint> [number] edits the stadium bounds polygon. */
+    private void bounds(Player player, String[] args) {
+        String usage = "Usage: /stadium bounds [stadium] <addpoint | removepoint [number] | setpoint <number>>";
+
+        Stadium stadium = null;
+        int next = 1;
+        if (args.length >= 2 && get(args[1]) != null) {
+            stadium = get(args[1]);
+            next = 2;
+        } else if (args.length >= 2 && !BOUNDS_ACTIONS.contains(args[1].toLowerCase())) {
+            error(player, "No stadium called " + args[1] + ".");
+            return;
+        } else {
+            String last = lastEdited.get(player.getUniqueId());
+            if (last != null) stadium = stadiums.get(last);
+        }
+        if (stadium == null || args.length <= next) {
+            error(player, stadium == null ? "Name a stadium first: /stadium bounds <stadium> <addpoint|removepoint|setpoint>" : usage);
+            return;
+        }
+        if (!requireEditable(player, stadium)) return;
+
+        String action = args[next].toLowerCase();
+        List<Location> points = stadium.bounds;
+        Location here = player.getLocation().getBlock().getLocation();
+
+        switch (action) {
+            case "addpoint" -> {
+                if (points.size() >= Stadium.MAX_BOUNDS_POINTS) {
+                    error(player, "A stadium can have at most " + Stadium.MAX_BOUNDS_POINTS + " bounds points.");
+                    return;
+                }
+                if (!points.isEmpty() && !sameWorld(points.get(0), here)) {
+                    error(player, "Bounds points must all be in the same world.");
+                    return;
+                }
+                points.add(here);
+                save();
+                player.sendMessage(Component.text("Added bounds point " + points.size() + " to " + stadium.name + " at "
+                        + describeBlock(here) + boundsHint(points.size()), NamedTextColor.GREEN));
+            }
+            case "removepoint" -> {
+                if (points.isEmpty()) {
+                    error(player, stadium.name + " has no bounds points to remove.");
+                    return;
+                }
+                int index = points.size() - 1; // the last point unless a number is given
+                if (args.length > next + 1) {
+                    index = parsePoint(player, args[next + 1], points.size());
+                    if (index < 0) return;
+                }
+                points.remove(index);
+                save();
+                player.sendMessage(Component.text("Removed bounds point " + (index + 1) + " from " + stadium.name
+                        + ". " + points.size() + " left" + (points.isEmpty() ? "" : " (the points after it moved down one number)")
+                        + ".", NamedTextColor.YELLOW));
+            }
+            case "setpoint" -> {
+                if (args.length <= next + 1) {
+                    error(player, "Usage: /stadium bounds [stadium] setpoint <number>  (stand where the point should go)");
+                    return;
+                }
+                int index = parsePoint(player, args[next + 1], points.size());
+                if (index < 0) return;
+                if (points.size() > 1 && !sameWorld(points.get(index == 0 ? 1 : 0), here)) {
+                    error(player, "Bounds points must all be in the same world.");
+                    return;
+                }
+                points.set(index, here);
+                save();
+                player.sendMessage(Component.text("Moved bounds point " + (index + 1) + " of " + stadium.name + " to "
+                        + describeBlock(here) + ".", NamedTextColor.GREEN));
+            }
+            default -> error(player, usage);
+        }
+    }
+
+    /** Converts "3" into index 2, or explains the problem and returns -1. */
+    private int parsePoint(Player player, String text, int size) {
+        int number;
+        try {
+            number = Integer.parseInt(text);
+        } catch (NumberFormatException e) {
+            error(player, "The point must be a number, like 1.");
+            return -1;
+        }
+        if (number < 1 || number > size) {
+            error(player, size == 0 ? "There are no bounds points yet." : "The point must be between 1 and " + size + ".");
+            return -1;
+        }
+        return number - 1;
+    }
+
+    private boolean sameWorld(Location a, Location b) {
+        return a.getWorld() != null && a.getWorld().equals(b.getWorld());
+    }
+
+    private String describeBlock(Location l) {
+        return l.getBlockX() + ", " + l.getBlockY() + ", " + l.getBlockZ();
+    }
+
+    private String boundsHint(int points) {
+        return points < 3 ? " (add at least " + (3 - points) + " more to make a shape)." : ".";
+    }
+
+    private boolean isAdmin(Player player) {
+        return player.hasPermission("wfsbbfl.stadium.admin");
+    }
+
+    private boolean canEditStadium(Player player, Stadium stadium) {
+        return isAdmin(player) || player.getUniqueId().equals(stadium.owner) || stadium.editors.containsKey(player.getUniqueId());
+    }
+
+    private String ownerName(Stadium stadium) {
+        if (stadium.owner == null) return "nobody";
+        String name = Bukkit.getOfflinePlayer(stadium.owner).getName();
+        return name != null ? name : stadium.owner.toString();
+    }
+
+    /** The owner, an invited editor or an admin may change a stadium. Unclaimed ones must be claimed first. */
+    private boolean requireAccess(Player player, Stadium stadium) {
+        if (stadium.owner == null && !isAdmin(player)) {
+            error(player, stadium.name + " has no owner yet. Use /stadium claim " + stadium.name + " to take it.");
+            return false;
+        }
+        if (!canEditStadium(player, stadium)) {
+            error(player, stadium.name + " belongs to " + ownerName(stadium) + ". Ask them to /stadium invite you.");
+            return false;
+        }
+        return true;
+    }
+
+    /** Only the owner (or an admin) may delete a stadium or manage who can edit it. */
+    private boolean requireOwner(Player player, Stadium stadium) {
+        if (stadium.owner == null && !isAdmin(player)) {
+            error(player, stadium.name + " has no owner yet. Use /stadium claim " + stadium.name + " to take it.");
+            return false;
+        }
+        if (!isAdmin(player) && !player.getUniqueId().equals(stadium.owner)) {
+            error(player, "Only the owner of " + stadium.name + " (" + ownerName(stadium) + ") can do that.");
+            return false;
+        }
+        return true;
+    }
+
+    /** /stadium invite <stadium> <player>: lets another builder edit the stadium too. */
+    private void invite(Player player, String[] args) {
+        if (args.length < 3) {
+            error(player, "Usage: /stadium invite <stadium> <player>");
+            return;
+        }
+        Stadium stadium = requireStadium(player, args, "invite");
+        if (stadium == null || !requireOwner(player, stadium)) return;
+
+        Player target = Bukkit.getPlayerExact(args[2]);
+        if (target == null) {
+            error(player, args[2] + " needs to be online to be invited.");
+            return;
+        }
+        if (target.getUniqueId().equals(stadium.owner)) {
+            error(player, target.getName() + " already owns " + stadium.name + ".");
+            return;
+        }
+        if (!canBuild(target)) {
+            error(player, target.getName() + " needs the builder role before they can use /stadium.");
+            return;
+        }
+        if (stadium.editors.containsKey(target.getUniqueId())) {
+            error(player, target.getName() + " is already invited to " + stadium.name + ".");
+            return;
+        }
+
+        stadium.editors.put(target.getUniqueId(), target.getName());
+        save();
+        player.sendMessage(Component.text("Invited " + target.getName() + " to edit " + stadium.name + ".", NamedTextColor.GREEN));
+        target.sendMessage(Component.text(player.getName() + " invited you to edit the stadium " + stadium.name
+                + ". Use /stadium edit " + stadium.name + " to start.", NamedTextColor.GREEN));
+    }
+
+    /** /stadium uninvite <stadium> <player>: takes someone's editing access away again. */
+    private void uninvite(Player player, String[] args) {
+        if (args.length < 3) {
+            error(player, "Usage: /stadium uninvite <stadium> <player>");
+            return;
+        }
+        Stadium stadium = requireStadium(player, args, "uninvite");
+        if (stadium == null || !requireOwner(player, stadium)) return;
+
+        UUID found = null;
+        for (Map.Entry<UUID, String> entry : stadium.editors.entrySet()) {
+            if (entry.getValue().equalsIgnoreCase(args[2])) found = entry.getKey();
+        }
+        if (found == null) {
+            error(player, args[2] + " isn't invited to " + stadium.name + ".");
+            return;
+        }
+        String name = stadium.editors.remove(found);
+        save();
+        player.sendMessage(Component.text(name + " can no longer edit " + stadium.name + ".", NamedTextColor.YELLOW));
+    }
+
+    /** /stadium claim <stadium>: takes ownership of a stadium that was made before owners existed. */
+    private void claim(Player player, String[] args) {
+        Stadium stadium = requireStadium(player, args, "claim");
+        if (stadium == null) return;
+        if (stadium.owner != null) {
+            error(player, stadium.name + " is already owned by " + ownerName(stadium) + ".");
+            return;
+        }
+        stadium.owner = player.getUniqueId();
+        save();
+        player.sendMessage(Component.text("You now own " + stadium.name + ". Use /stadium edit " + stadium.name
+                + " to change it, and /stadium invite to let others help.", NamedTextColor.GREEN));
     }
 
     /**
@@ -365,7 +631,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
     /** /stadium confirm [name]: locks the stadium and hides its goal particles. */
     private void confirm(Player player, String[] args) {
         Stadium stadium = namedOrLast(player, args, "confirm");
-        if (stadium == null) return;
+        if (stadium == null || !requireAccess(player, stadium)) return;
         if (stadium.confirmed) {
             error(player, stadium.name + " is already confirmed.");
             return;
@@ -386,9 +652,9 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
     /** /stadium edit [name]: unlocks the stadium and brings the goal particles back. */
     private void edit(Player player, String[] args) {
         Stadium stadium = namedOrLast(player, args, "edit");
-        if (stadium == null) return;
-        if (!stadium.confirmed) {
-            error(player, stadium.name + " is already being edited.");
+        if (stadium == null || !requireAccess(player, stadium)) return;
+        if (!stadium.confirmed && stadium.name.toLowerCase().equals(lastEdited.get(player.getUniqueId()))) {
+            error(player, "You are already editing " + stadium.name + ".");
             return;
         }
         startEditing(player, stadium); // locks whatever this player was editing before
@@ -400,16 +666,40 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
 
     // ------------------------------------------------------------------ particles
 
+    /** Each builder only sees the particles of the stadium they are editing themselves. */
     private void showGoalParticles() {
-        List<Stadium> editing = stadiums.values().stream().filter(s -> !s.confirmed).toList();
-        if (editing.isEmpty()) return;
-
         for (Player viewer : Bukkit.getOnlinePlayers()) {
-            if (!canBuild(viewer)) continue;
-            for (Stadium stadium : editing) {
-                for (Team team : Team.values()) drawGoal(viewer, stadium, team);
-                drawCenter(viewer, stadium);
-            }
+            String key = lastEdited.get(viewer.getUniqueId());
+            if (key == null) continue;
+            Stadium stadium = stadiums.get(key);
+            if (stadium == null || stadium.confirmed) continue;
+            if (!canBuild(viewer) || !canEditStadium(viewer, stadium)) continue;
+
+            for (Team team : Team.values()) drawGoal(viewer, stadium, team);
+            drawCenter(viewer, stadium);
+            drawBounds(viewer, stadium);
+        }
+    }
+
+    /** Outlines the bounds polygon in white: an upright marker at each point and lines between them in order. */
+    private void drawBounds(Player viewer, Stadium stadium) {
+        List<Location> points = stadium.bounds;
+        if (points.isEmpty() || !sameWorld(points.get(0), viewer.getLocation())) return;
+
+        Particle.DustOptions dust = new Particle.DustOptions(Color.WHITE, 1.2f);
+        int count = points.size();
+        for (int i = 0; i < count; i++) {
+            Location a = points.get(i);
+            double ax = a.getBlockX() + 0.5;
+            double ay = a.getBlockY() + 0.1;
+            double az = a.getBlockZ() + 0.5;
+            drawLine(viewer, dust, 1.0, ax, ay, az, ax, ay + 2, az); // marker so single points show up
+
+            // Lines run 1 -> 2 -> 3 ...; the shape only closes (last -> first) once there are 3 or more points.
+            boolean hasNext = i + 1 < count || count >= 3;
+            if (!hasNext) continue;
+            Location b = points.get((i + 1) % count);
+            drawLine(viewer, dust, 1.0, ax, ay, az, b.getBlockX() + 0.5, b.getBlockY() + 0.1, b.getBlockZ() + 0.5);
         }
     }
 
@@ -468,12 +758,26 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
 
     private void drawLine(Player viewer, Particle.DustOptions dust,
                           double x1, double y1, double z1, double x2, double y2, double z2) {
+        drawLine(viewer, dust, PARTICLE_SPACING, x1, y1, z1, x2, y2, z2);
+    }
+
+    /** Dust points along a line, skipping the ones too far from the viewer to be seen anyway. */
+    private void drawLine(Player viewer, Particle.DustOptions dust, double spacing,
+                          double x1, double y1, double z1, double x2, double y2, double z2) {
         double length = Math.sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1) + (z2 - z1) * (z2 - z1));
-        int steps = (int) Math.max(1, Math.min(MAX_POINTS_PER_EDGE, Math.ceil(length / PARTICLE_SPACING)));
+        int steps = (int) Math.max(1, Math.min(MAX_POINTS_PER_EDGE, Math.ceil(length / spacing)));
+        Location eye = viewer.getLocation();
+        double limit = PARTICLE_VIEW_DISTANCE * PARTICLE_VIEW_DISTANCE;
         for (int i = 0; i <= steps; i++) {
             double t = (double) i / steps;
-            viewer.spawnParticle(Particle.DUST, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, z1 + (z2 - z1) * t,
-                    1, 0, 0, 0, 0, dust);
+            double x = x1 + (x2 - x1) * t;
+            double y = y1 + (y2 - y1) * t;
+            double z = z1 + (z2 - z1) * t;
+            double dx = x - eye.getX();
+            double dy = y - eye.getY();
+            double dz = z - eye.getZ();
+            if (dx * dx + dy * dy + dz * dz > limit) continue;
+            viewer.spawnParticle(Particle.DUST, x, y, z, 1, 0, 0, 0, 0, dust);
         }
     }
 
@@ -522,8 +826,15 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
             String path = "stadiums." + stadium.name.toLowerCase();
             yaml.set(path + ".name", stadium.name);
             yaml.set(path + ".confirmed", stadium.confirmed);
+            if (stadium.owner != null) yaml.set(path + ".owner", stadium.owner.toString());
+            for (Map.Entry<UUID, String> editor : stadium.editors.entrySet()) {
+                yaml.set(path + ".editors." + editor.getKey(), editor.getValue());
+            }
             if (stadium.block != null) yaml.set(path + ".block", stadium.block.name());
             writeLocation(yaml, path + ".center", stadium.center);
+            for (int i = 0; i < stadium.bounds.size(); i++) {
+                writeLocation(yaml, path + ".bounds." + (i + 1), stadium.bounds.get(i));
+            }
             for (Team team : Team.values()) {
                 Location[] corners = stadium.goals.get(team);
                 String goalPath = path + ".goals." + team.name().toLowerCase();
@@ -552,12 +863,35 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
             Stadium stadium = new Stadium(yaml.getString(path + ".name", key));
             // Stadiums saved before confirming existed count as finished, so they don't suddenly show particles.
             stadium.confirmed = yaml.getBoolean(path + ".confirmed", true);
+            String ownerText = yaml.getString(path + ".owner");
+            if (ownerText != null) {
+                try {
+                    stadium.owner = UUID.fromString(ownerText);
+                } catch (IllegalArgumentException e) {
+                    plugin.getLogger().warning("Bad owner id for stadium " + key + "; it can be claimed again.");
+                }
+            }
+            ConfigurationSection editorSection = yaml.getConfigurationSection(path + ".editors");
+            if (editorSection != null) {
+                for (String id : editorSection.getKeys(false)) {
+                    try {
+                        stadium.editors.put(UUID.fromString(id), editorSection.getString(id, id));
+                    } catch (IllegalArgumentException ignored) {
+                        // skip a corrupt entry
+                    }
+                }
+            }
             String blockName = yaml.getString(path + ".block");
             if (blockName != null) {
                 Material block = Material.matchMaterial(blockName);
                 if (block != null && block.isBlock() && block.isItem()) stadium.block = block;
             }
             stadium.center = readLocation(yaml, path + ".center");
+            for (int i = 1; i <= Stadium.MAX_BOUNDS_POINTS; i++) {
+                Location point = readLocation(yaml, path + ".bounds." + i);
+                if (point == null) break;
+                stadium.bounds.add(point);
+            }
             for (Team team : Team.values()) {
                 String goalPath = path + ".goals." + team.name().toLowerCase();
                 Location[] corners = stadium.goals.get(team);

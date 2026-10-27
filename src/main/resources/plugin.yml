@@ -17,7 +17,7 @@ commands:
     permission: wfsbbfl.match
   stadium:
     description: Create stadiums, set centre points and goal areas.
-    usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit>
+    usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds>
 permissions:
   whistle.give:
     description: Allows use of /whistle
@@ -30,4 +30,7 @@ permissions:
     default: op
   wfsbbfl.stadium:
     description: Allows /stadium without the LuckPerms builder role
+    default: op
+  wfsbbfl.stadium.admin:
+    description: Allows editing, deleting and managing invites on any stadium, whoever owns it
     default: op
