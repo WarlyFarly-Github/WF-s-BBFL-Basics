@@ -12,6 +12,7 @@ import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
 import org.bukkit.DyeColor;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
@@ -145,7 +146,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     void shutdown() {
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
-            m.onlineMembers().forEach(p -> restoreChestplate(m, p));
+            m.onlineMembers().forEach(p -> {
+                restoreChestplate(m, p);
+                restoreGameMode(m, p);
+            });
             if (m.ball != null) m.ball.remove();
         });
         removeScoreboardTeams();
@@ -288,6 +292,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 match.startPositions.put(p.getUniqueId(), p.getLocation().clone());
                 match.showBar(p);
                 giveJersey(match, p);
+                enterAdventure(match, p);
             }
             match.broadcast(Component.text("The match has started!", NamedTextColor.GREEN, TextDecoration.BOLD));
             startTimer(match);
@@ -303,6 +308,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (match.ball != null) match.ball.remove();
         for (Player p : match.onlineMembers()) {
             restoreChestplate(match, p);
+            restoreGameMode(match, p);
             match.hideBar(p);
             if (!p.getUniqueId().equals(match.host)) {
                 p.sendMessage(Component.text("The host cancelled the match.", NamedTextColor.YELLOW));
@@ -473,6 +479,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             match.showBar(player);
             match.startPositions.putIfAbsent(player.getUniqueId(), player.getLocation().clone());
             giveJersey(match, player);
+            enterAdventure(match, player);
         }
 
         match.broadcast(Component.text(player.getName(), NamedTextColor.YELLOW)
@@ -1142,6 +1149,20 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         player.getInventory().setChestplate(saved.getType() == Material.AIR ? null : saved);
     }
 
+    // ------------------------------------------------------------------ game mode
+
+    /** Puts the player in Adventure mode for the match, remembering the mode they were in before. */
+    private void enterAdventure(Match match, Player player) {
+        match.savedGameModes.putIfAbsent(player.getUniqueId(), player.getGameMode());
+        if (player.getGameMode() != GameMode.ADVENTURE) player.setGameMode(GameMode.ADVENTURE);
+    }
+
+    /** Gives the player back the game mode they had before the match. */
+    private void restoreGameMode(Match match, Player player) {
+        GameMode saved = match.savedGameModes.remove(player.getUniqueId());
+        if (saved != null) player.setGameMode(saved);
+    }
+
     // ------------------------------------------------------------------ name tag colours
 
     private Scoreboard mainScoreboard() {
@@ -1244,6 +1265,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private void removeMember(Match match, Player player) {
         restoreChestplate(match, player);
+        restoreGameMode(match, player);
         match.remove(player.getUniqueId());
         matchByPlayer.remove(player.getUniqueId());
         match.hideBar(player);
@@ -1266,6 +1288,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         for (Player p : match.onlineMembers()) {
             restoreChestplate(match, p);
+            restoreGameMode(match, p);
             match.hideBar(p);
             p.sendMessage(message);
             p.sendMessage(overview);

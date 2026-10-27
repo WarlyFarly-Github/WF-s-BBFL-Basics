@@ -5,6 +5,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
+import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.SulfurCube;
@@ -71,6 +72,9 @@ final class Match {
 
     // Each player's own chestplate, put back when they leave or the match ends.
     final Map<UUID, ItemStack> savedChestplates = new HashMap<>();
+
+    // Each player's own game mode, put back when they leave or the match ends (players are in Adventure during a match).
+    final Map<UUID, GameMode> savedGameModes = new HashMap<>();
 
     private final Set<UUID> red = new LinkedHashSet<>();
     private final Set<UUID> blue = new LinkedHashSet<>();
