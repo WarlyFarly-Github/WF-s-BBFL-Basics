@@ -36,6 +36,7 @@ import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.LeatherArmorMeta;
 import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.persistence.PersistentDataType;
@@ -71,11 +72,22 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
     }
 
+    /** Marks the stadium choice chest GUI. */
+    private static final class StadiumGui implements InventoryHolder {
+        private Inventory inventory;
+
+        @Override
+        public Inventory getInventory() {
+            return inventory;
+        }
+    }
+
     private final JavaPlugin plugin;
     private final StadiumManager stadiums;
     private final NamespacedKey ballKey;
     private final NamespacedKey targetKey;
     private final NamespacedKey jerseyKey;
+    private final NamespacedKey stadiumKey;
     private final Map<UUID, Match> matchByPlayer = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
 
@@ -85,6 +97,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.ballKey = new NamespacedKey(plugin, "football");
         this.targetKey = new NamespacedKey(plugin, "invite_target");
         this.jerseyKey = new NamespacedKey(plugin, "jersey");
+        this.stadiumKey = new NamespacedKey(plugin, "stadium_choice");
 
         // Checks for the ball entering a goal area every 2 ticks.
         Bukkit.getScheduler().runTaskTimer(plugin, this::checkGoals, 2L, 2L);
@@ -185,6 +198,19 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 .append(Component.text("Red", NamedTextColor.RED, TextDecoration.BOLD))
                 .append(Component.text(" team. Use /match start to kick off.", NamedTextColor.GREEN)));
 
+        if (stadiums.names().isEmpty()) {
+            host.sendMessage(Component.text("There are no stadiums yet, so the ball will use your start position.",
+                    NamedTextColor.YELLOW));
+            afterStadiumChoice(host);
+        } else {
+            openStadiumGui(host);
+        }
+    }
+
+    /** Next step of /match create once the stadium is decided: the invite GUI (if anyone can be invited). */
+    private void afterStadiumChoice(Player host) {
+        boolean othersOnline = Bukkit.getOnlinePlayers().stream()
+                .anyMatch(p -> !p.getUniqueId().equals(host.getUniqueId()));
         if (othersOnline) {
             openInviteGui(host);
         } else {
@@ -290,6 +316,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(host, "No stadium called " + args[1] + ".");
             return;
         }
+        applyStadium(host, match, stadium);
+    }
+
+    private void applyStadium(Player host, Match match, Stadium stadium) {
         match.stadium = stadium;
         host.sendMessage(Component.text("Stadium set to " + stadium.name + ".", NamedTextColor.GREEN));
         if (!stadium.hasCenter()) {
@@ -302,6 +332,92 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                         + " goal isn't set up yet, so goals there won't be detected.", NamedTextColor.YELLOW));
             }
         }
+    }
+
+    // ------------------------------------------------------------------ stadium GUI
+
+    private void openStadiumGui(Player host) {
+        List<String> names = stadiums.names();
+        if (names.size() > 53) names = names.subList(0, 53);
+
+        int rows = Math.min(6, names.size() / 9 + 1); // +1 slot for the "no stadium" option
+        StadiumGui holder = new StadiumGui();
+        Inventory inventory = Bukkit.createInventory(holder, rows * 9,
+                Component.text("Choose a stadium", NamedTextColor.DARK_GRAY));
+        holder.inventory = inventory;
+
+        for (String name : names) {
+            inventory.addItem(createStadiumItem(stadiums.get(name)));
+        }
+
+        ItemStack none = new ItemStack(Material.BARRIER);
+        ItemMeta meta = none.getItemMeta();
+        meta.displayName(Component.text("No stadium", NamedTextColor.RED).decoration(TextDecoration.ITALIC, false));
+        meta.lore(List.of(Component.text("The ball will use your start position.", NamedTextColor.GRAY)
+                .decoration(TextDecoration.ITALIC, false)));
+        meta.getPersistentDataContainer().set(stadiumKey, PersistentDataType.STRING, "");
+        none.setItemMeta(meta);
+        inventory.setItem(rows * 9 - 1, none);
+
+        host.openInventory(inventory);
+    }
+
+    private ItemStack createStadiumItem(Stadium stadium) {
+        boolean ready = stadium.hasCenter() && stadium.goalComplete(Team.RED) && stadium.goalComplete(Team.BLUE);
+        ItemStack item = new ItemStack(ready ? Material.GRASS_BLOCK : Material.DIRT);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(Component.text(stadium.name, NamedTextColor.GREEN, TextDecoration.BOLD)
+                .decoration(TextDecoration.ITALIC, false));
+        meta.lore(List.of(
+                statusLore("Centre point", stadium.hasCenter()),
+                statusLore("Red goal", stadium.goalComplete(Team.RED)),
+                statusLore("Blue goal", stadium.goalComplete(Team.BLUE)),
+                Component.empty(),
+                Component.text("Click to select", NamedTextColor.YELLOW).decoration(TextDecoration.ITALIC, false)));
+        meta.getPersistentDataContainer().set(stadiumKey, PersistentDataType.STRING, stadium.name);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private Component statusLore(String label, boolean set) {
+        return Component.text(label + ": ", NamedTextColor.GRAY)
+                .append(set ? Component.text("set", NamedTextColor.GREEN) : Component.text("not set", NamedTextColor.RED))
+                .decoration(TextDecoration.ITALIC, false);
+    }
+
+    @EventHandler
+    public void onStadiumClick(InventoryClickEvent event) {
+        if (!(event.getView().getTopInventory().getHolder() instanceof StadiumGui)) return;
+        event.setCancelled(true);
+
+        if (event.getClickedInventory() != event.getView().getTopInventory()) return;
+        if (!(event.getWhoClicked() instanceof Player host)) return;
+
+        ItemStack item = event.getCurrentItem();
+        if (item == null || !item.hasItemMeta()) return;
+        String choice = item.getItemMeta().getPersistentDataContainer().get(stadiumKey, PersistentDataType.STRING);
+        if (choice == null) return;
+
+        Match match = matchByPlayer.get(host.getUniqueId());
+        if (match == null || !match.host.equals(host.getUniqueId())) {
+            host.closeInventory();
+            return;
+        }
+
+        if (choice.isEmpty()) {
+            match.stadium = null;
+            host.sendMessage(Component.text("No stadium selected.", NamedTextColor.YELLOW));
+        } else {
+            Stadium stadium = stadiums.get(choice);
+            if (stadium == null) {
+                error(host, "That stadium no longer exists.");
+                return;
+            }
+            applyStadium(host, match, stadium);
+        }
+
+        // Swap to the invite GUI on the next tick rather than inside the click event.
+        Bukkit.getScheduler().runTask(plugin, () -> afterStadiumChoice(host));
     }
 
     /** Where the ball is placed during freezes: the stadium centre if there is one. */
@@ -453,7 +569,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     @EventHandler
     public void onInviteDrag(InventoryDragEvent event) {
-        if (event.getView().getTopInventory().getHolder() instanceof InviteGui) {
+        InventoryHolder holder = event.getView().getTopInventory().getHolder();
+        if (holder instanceof InviteGui || holder instanceof StadiumGui) {
             event.setCancelled(true);
         }
     }
