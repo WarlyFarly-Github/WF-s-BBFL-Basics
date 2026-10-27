@@ -50,7 +50,7 @@ Additional commands support player invitations and stadium goal configuration.
 Build with:
 
 ```bash
-gradlew build
+gradle build
 ```
 
 ## Project Structure
