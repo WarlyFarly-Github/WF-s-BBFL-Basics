@@ -4,6 +4,7 @@ version: 1.0.0
 author: WarlyFarly
 main: dev.whistle.WFsBBFLBasics
 api-version: '26.3'
+softdepend: [TAB]
 description: Basic utilities for BBFL, including the admin Whistle and football matches.
 commands:
   whistle:
@@ -16,7 +17,7 @@ commands:
     permission: wfsbbfl.match
   stadium:
     description: Create stadiums, set centre points and goal areas.
-    usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block>
+    usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit>
 permissions:
   whistle.give:
     description: Allows use of /whistle

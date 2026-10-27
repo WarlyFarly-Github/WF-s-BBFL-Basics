@@ -16,6 +16,12 @@ final class Stadium {
 
     final String name;
 
+    /**
+     * Confirmed stadiums are locked: no more edits, and no goal particles. New stadiums start unconfirmed
+     * (editing) until /stadium confirm; /stadium edit unlocks them again.
+     */
+    boolean confirmed;
+
     /** The block shown for this stadium in the stadium chest menu; null means the default player head. */
     Material block;
 

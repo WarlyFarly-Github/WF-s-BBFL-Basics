@@ -49,6 +49,7 @@ import org.bukkit.inventory.meta.LeatherArmorMeta;
 import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
+import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.util.Vector;
 
 import java.time.Duration;
@@ -116,8 +117,19 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private final Map<UUID, Match> matchByPlayer = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
 
+    private static final String RED_SCOREBOARD_TEAM = "bbfl_red";
+    private static final String BLUE_SCOREBOARD_TEAM = "bbfl_blue";
+
+    /** The scoreboard team a player was on before the match, put back afterwards. */
+    private final Map<UUID, String> previousScoreboardTeams = new HashMap<>();
+
+    /** Name tag colours go through TAB when it is installed, because TAB overrides scoreboard teams. */
+    private final TabNameTags tabNames;
+
     MatchManager(JavaPlugin plugin, StadiumManager stadiums) {
         this.plugin = plugin;
+        this.tabNames = new TabNameTags(plugin);
+        removeScoreboardTeams(); // leftovers from a crash or a reload
         this.stadiums = stadiums;
         this.ballKey = new NamespacedKey(plugin, "football");
         this.targetKey = new NamespacedKey(plugin, "invite_target");
@@ -135,6 +147,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             m.onlineMembers().forEach(p -> restoreChestplate(m, p));
             if (m.ball != null) m.ball.remove();
         });
+        removeScoreboardTeams();
     }
 
     // ------------------------------------------------------------------ commands
@@ -1040,12 +1053,66 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         match.savedChestplates.putIfAbsent(player.getUniqueId(),
                 current == null || isJersey(current) ? new ItemStack(Material.AIR) : current);
         player.getInventory().setChestplate(createJersey(match.teamOf(player.getUniqueId())));
+        applyNameColor(player, match.teamOf(player.getUniqueId()));
     }
 
     private void restoreChestplate(Match match, Player player) {
+        clearNameColor(player);
         ItemStack saved = match.savedChestplates.remove(player.getUniqueId());
         if (saved == null) return;
         player.getInventory().setChestplate(saved.getType() == Material.AIR ? null : saved);
+    }
+
+    // ------------------------------------------------------------------ name tag colours
+
+    private Scoreboard mainScoreboard() {
+        return Bukkit.getScoreboardManager().getMainScoreboard();
+    }
+
+    private boolean isOurScoreboardTeam(org.bukkit.scoreboard.Team team) {
+        return team.getName().equals(RED_SCOREBOARD_TEAM) || team.getName().equals(BLUE_SCOREBOARD_TEAM);
+    }
+
+    /** Colours the player's name tag with their team colour: through TAB if it is installed, otherwise a scoreboard team. */
+    private void applyNameColor(Player player, Team team) {
+        // With TAB, set a temporary name tag prefix ("&c" red, "&9" blue) instead of using a scoreboard team.
+        if (tabNames.isPresent() && tabNames.setPrefix(player, team == Team.RED ? "&c" : "&9")) return;
+
+        Scoreboard board = mainScoreboard();
+        String teamName = team == Team.RED ? RED_SCOREBOARD_TEAM : BLUE_SCOREBOARD_TEAM;
+        org.bukkit.scoreboard.Team ours = board.getTeam(teamName);
+        if (ours == null) ours = board.registerNewTeam(teamName);
+        ours.color(team.color);
+
+        org.bukkit.scoreboard.Team current = board.getEntryTeam(player.getName());
+        if (current != null && current.equals(ours)) return;
+        if (current != null && !isOurScoreboardTeam(current)) {
+            previousScoreboardTeams.putIfAbsent(player.getUniqueId(), current.getName());
+        }
+        ours.addEntry(player.getName()); // also takes them off any other team on this scoreboard
+    }
+
+    private void clearNameColor(Player player) {
+        tabNames.resetPrefix(player);
+
+        Scoreboard board = mainScoreboard();
+        org.bukkit.scoreboard.Team current = board.getEntryTeam(player.getName());
+        if (current != null && isOurScoreboardTeam(current)) current.removeEntry(player.getName());
+
+        String previous = previousScoreboardTeams.remove(player.getUniqueId());
+        if (previous != null) {
+            org.bukkit.scoreboard.Team old = board.getTeam(previous);
+            if (old != null) old.addEntry(player.getName());
+        }
+    }
+
+    private void removeScoreboardTeams() {
+        Scoreboard board = mainScoreboard();
+        for (String name : List.of(RED_SCOREBOARD_TEAM, BLUE_SCOREBOARD_TEAM)) {
+            org.bukkit.scoreboard.Team team = board.getTeam(name);
+            if (team != null) team.unregister();
+        }
+        previousScoreboardTeams.clear();
     }
 
     /** Players can't take the jersey off or swap it out during a match. */
