@@ -185,6 +185,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(host, "You are already in a match! Use /match leave first.");
             return;
         }
+        if (stadiums.names().isEmpty()) {
+            error(host, "There are no stadiums yet. A builder needs to make one with /stadium create first.");
+            return;
+        }
         boolean othersOnline = Bukkit.getOnlinePlayers().stream()
                 .anyMatch(p -> !p.getUniqueId().equals(host.getUniqueId()));
         if (!othersOnline && !bypass) {
@@ -196,15 +200,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         matchByPlayer.put(host.getUniqueId(), match);
         host.sendMessage(Component.text("Match created! You are on the ", NamedTextColor.GREEN)
                 .append(Component.text("Red", NamedTextColor.RED, TextDecoration.BOLD))
-                .append(Component.text(" team. Use /match start to kick off.", NamedTextColor.GREEN)));
+                .append(Component.text(" team. Choose a stadium, then use /match start to kick off.", NamedTextColor.GREEN)));
 
-        if (stadiums.names().isEmpty()) {
-            host.sendMessage(Component.text("There are no stadiums yet, so the ball will use your start position.",
-                    NamedTextColor.YELLOW));
-            afterStadiumChoice(host);
-        } else {
-            openStadiumGui(host);
-        }
+        openStadiumGui(host);
     }
 
     /** Next step of /match create once the stadium is decided: the invite GUI (if anyone can be invited). */
@@ -222,6 +220,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private void start(Player host) {
         Match match = hostedMatch(host);
         if (match == null) return;
+        if (match.stadium == null) {
+            error(host, "You must choose a stadium before starting. Use /match stadium <name>.");
+            return;
+        }
 
         boolean firstStart = !match.started;
         match.started = true;
@@ -338,9 +340,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private void openStadiumGui(Player host) {
         List<String> names = stadiums.names();
-        if (names.size() > 53) names = names.subList(0, 53);
+        if (names.size() > 54) names = names.subList(0, 54);
 
-        int rows = Math.min(6, names.size() / 9 + 1); // +1 slot for the "no stadium" option
+        int rows = (names.size() - 1) / 9 + 1;
         StadiumGui holder = new StadiumGui();
         Inventory inventory = Bukkit.createInventory(holder, rows * 9,
                 Component.text("Choose a stadium", NamedTextColor.DARK_GRAY));
@@ -349,15 +351,6 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         for (String name : names) {
             inventory.addItem(createStadiumItem(stadiums.get(name)));
         }
-
-        ItemStack none = new ItemStack(Material.BARRIER);
-        ItemMeta meta = none.getItemMeta();
-        meta.displayName(Component.text("No stadium", NamedTextColor.RED).decoration(TextDecoration.ITALIC, false));
-        meta.lore(List.of(Component.text("The ball will use your start position.", NamedTextColor.GRAY)
-                .decoration(TextDecoration.ITALIC, false)));
-        meta.getPersistentDataContainer().set(stadiumKey, PersistentDataType.STRING, "");
-        none.setItemMeta(meta);
-        inventory.setItem(rows * 9 - 1, none);
 
         host.openInventory(inventory);
     }
@@ -404,17 +397,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
 
-        if (choice.isEmpty()) {
-            match.stadium = null;
-            host.sendMessage(Component.text("No stadium selected.", NamedTextColor.YELLOW));
-        } else {
-            Stadium stadium = stadiums.get(choice);
-            if (stadium == null) {
-                error(host, "That stadium no longer exists.");
-                return;
-            }
-            applyStadium(host, match, stadium);
+        Stadium stadium = stadiums.get(choice);
+        if (stadium == null) {
+            error(host, "That stadium no longer exists.");
+            return;
         }
+        applyStadium(host, match, stadium);
 
         // Swap to the invite GUI on the next tick rather than inside the click event.
         Bukkit.getScheduler().runTask(plugin, () -> afterStadiumChoice(host));
