@@ -53,22 +53,6 @@ Build with:
 gradle build
 ```
 
-## Project Structure
-
-```text
-WFsBBRLBasics/
-├── src/main/java/dev/whistle/
-│   ├── WFsBBRLBasics.java
-│   ├── Match.java
-│   ├── MatchManager.java
-│   ├── Stadium.java
-│   └── StadiumManager.java
-├── src/main/resources/plugin.yml
-├── build.gradle.kts
-└── settings.gradle.kts
-```
-
-Stadium configurations are stored in `stadiums.yml`.
 
 ## Development Status
 
