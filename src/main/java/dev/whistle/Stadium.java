@@ -2,6 +2,7 @@ package dev.whistle;
 
 import dev.whistle.Match.Team;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 
 import java.util.EnumMap;
@@ -14,6 +15,9 @@ final class Stadium {
     static final double DEFAULT_GOAL_HEIGHT = 3.0;
 
     final String name;
+
+    /** The block shown for this stadium in the stadium chest menu; null means the default player head. */
+    Material block;
 
     /** Where the ball is placed during the 5 second freezes. */
     Location center;

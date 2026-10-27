@@ -180,7 +180,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (args.length == 2 && args[0].equalsIgnoreCase("stadium")) {
             return stadiums.names().stream().filter(n -> n.toLowerCase().startsWith(args[1].toLowerCase())).toList();
         }
-        if (args.length == 2 && args[0].equalsIgnoreCase("create") && sender.hasPermission("wfsbbrl.bypass")) {
+        if (args.length == 2 && args[0].equalsIgnoreCase("create") && sender.hasPermission("wfsbbfl.bypass")) {
             return List.of("bypass");
         }
         if (args.length == 3 && args[0].equalsIgnoreCase("goal")) {
@@ -194,10 +194,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         boolean bypass = false;
         if (args.length >= 2) {
             if (!args[1].equalsIgnoreCase("bypass")) {
-                error(host, "Usage: /match create" + (host.hasPermission("wfsbbrl.bypass") ? " [bypass]" : ""));
+                error(host, "Usage: /match create" + (host.hasPermission("wfsbbfl.bypass") ? " [bypass]" : ""));
                 return;
             }
-            if (!host.hasPermission("wfsbbrl.bypass")) {
+            if (!host.hasPermission("wfsbbfl.bypass")) {
                 error(host, "You don't have permission to bypass.");
                 return;
             }
@@ -580,7 +580,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         inventory.setItem(SLOT_PREVIOUS, arrowBanner("Previous Page", false));
-        inventory.setItem(SLOT_PAGE, pageMarker(type == MenuType.PLAYERS ? Material.PAPER : Material.WHITE_BANNER, page, pages));
+        inventory.setItem(SLOT_PAGE, pageMarker(page, pages));
         inventory.setItem(SLOT_NEXT, arrowBanner("Next Page", true));
         inventory.setItem(SLOT_BACK, backButton());
         host.openInventory(inventory);
@@ -598,9 +598,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return item;
     }
 
-    /** Page number item (white banner, or paper in the player menu) whose stack size is the current page. */
-    private ItemStack pageMarker(Material material, int page, int pages) {
-        ItemStack item = new ItemStack(material, page);
+    /** Paper whose stack size is the current page number. */
+    private ItemStack pageMarker(int page, int pages) {
+        ItemStack item = new ItemStack(Material.PAPER, page);
         ItemMeta meta = item.getItemMeta();
         meta.displayName(bold("Page Number", NamedTextColor.WHITE));
         meta.lore(List.of(plain("Page " + page + " of " + pages, NamedTextColor.GRAY)));
@@ -610,9 +610,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private ItemStack createStadiumItem(Stadium stadium) {
-        ItemStack item = new ItemStack(Material.PLAYER_HEAD);
+        ItemStack item = new ItemStack(stadium.block != null ? stadium.block : Material.PLAYER_HEAD);
         ItemMeta meta = item.getItemMeta();
         meta.displayName(bold(stadium.name, NamedTextColor.GOLD));
+        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES, ItemFlag.HIDE_ADDITIONAL_TOOLTIP);
         meta.lore(List.of(
                 statusLore("Centre point", stadium.hasCenter()),
                 statusLore("Red goal", stadium.goalComplete(Team.RED)),

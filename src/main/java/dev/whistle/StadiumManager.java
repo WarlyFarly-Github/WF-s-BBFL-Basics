@@ -5,6 +5,7 @@ import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
+import org.bukkit.Material;
 import org.bukkit.World;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -24,12 +25,12 @@ import java.util.Map;
 import java.util.logging.Level;
 import java.util.regex.Pattern;
 
-/** Handles /stadium and saves stadiums to plugins/WFs_BBRL_Basics/stadiums.yml. */
+/** Handles /stadium and saves stadiums to plugins/WFs_BBFL_Basics/stadiums.yml. */
 final class StadiumManager implements CommandExecutor, TabCompleter {
 
     private static final Pattern VALID_NAME = Pattern.compile("[A-Za-z0-9_-]{1,32}");
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "delete", "list", "info", "setcentre", "setgoal", "goalheight");
+            List.of("create", "delete", "list", "info", "setcentre", "setgoal", "goalheight", "block");
 
     private final JavaPlugin plugin;
     private final File file;
@@ -53,7 +54,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
 
     /** The "builder" LuckPerms role grants the group.builder permission node. Operators are allowed too. */
     private boolean canBuild(Player player) {
-        return player.hasPermission("group.builder") || player.hasPermission("wfsbbrl.stadium");
+        return player.hasPermission("group.builder") || player.hasPermission("wfsbbfl.stadium");
     }
 
     @Override
@@ -67,7 +68,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight>");
+            error(player, "Usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block>");
             return true;
         }
 
@@ -79,7 +80,8 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
             case "setcentre" -> setCenter(player, args);
             case "setgoal" -> setGoal(player, args);
             case "goalheight" -> setGoalHeight(player, args);
-            default -> error(player, "Unknown subcommand. Use /stadium <create|delete|list|info|setcentre|setgoal|goalheight>");
+            case "block" -> setBlock(player, args);
+            default -> error(player, "Unknown subcommand. Use /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block>");
         }
         return true;
     }
@@ -92,11 +94,14 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
             return filter(SUBCOMMANDS, args[0]);
         }
         String sub = args[0].toLowerCase();
-        if (args.length == 2 && List.of("delete", "info", "setcentre", "setgoal", "goalheight").contains(sub)) {
+        if (args.length == 2 && List.of("delete", "info", "setcentre", "setgoal", "goalheight", "block").contains(sub)) {
             return filter(names(), args[1]);
         }
         if (args.length == 3 && (sub.equals("setgoal") || sub.equals("goalheight"))) {
             return filter(List.of("red", "blue"), args[2]);
+        }
+        if (args.length == 3 && sub.equals("block")) {
+            return filter(List.of("reset"), args[2]);
         }
         if (args.length == 4 && sub.equals("setgoal")) {
             return filter(List.of("pos1", "pos2", "pos3", "pos4"), args[3]);
@@ -150,6 +155,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
         if (stadium == null) return;
 
         player.sendMessage(Component.text("Stadium " + stadium.name, NamedTextColor.GOLD));
+        player.sendMessage(statusLine("Menu block", stadium.block == null ? "player head (default)" : stadium.block.name()));
         player.sendMessage(statusLine("Centre point", stadium.hasCenter() ? describe(stadium.center) : null));
         for (Team team : Team.values()) {
             String value = null;
@@ -170,6 +176,34 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
         save();
         player.sendMessage(Component.text("Centre point of " + stadium.name + " set to "
                 + describe(stadium.center) + ". The ball is placed here during freezes.", NamedTextColor.GREEN));
+    }
+
+    /** /stadium block <name> uses the block in your main hand as the stadium's icon in the chest menu. */
+    private void setBlock(Player player, String[] args) {
+        if (args.length < 2) {
+            error(player, "Usage: /stadium block <name> [reset]  (hold the block you want in your main hand)");
+            return;
+        }
+        Stadium stadium = requireStadium(player, args, "block");
+        if (stadium == null) return;
+
+        if (args.length >= 3 && args[2].equalsIgnoreCase("reset")) {
+            stadium.block = null;
+            save();
+            player.sendMessage(Component.text("Menu block of " + stadium.name + " reset to the player head.",
+                    NamedTextColor.GREEN));
+            return;
+        }
+
+        Material held = player.getInventory().getItemInMainHand().getType();
+        if (held.isAir() || !held.isBlock() || !held.isItem()) {
+            error(player, "Hold the block you want to use in your main hand first.");
+            return;
+        }
+        stadium.block = held;
+        save();
+        player.sendMessage(Component.text("Menu block of " + stadium.name + " set to " + held.name() + ".",
+                NamedTextColor.GREEN));
     }
 
     private void setGoal(Player player, String[] args) {
@@ -287,6 +321,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
         for (Stadium stadium : stadiums.values()) {
             String path = "stadiums." + stadium.name.toLowerCase();
             yaml.set(path + ".name", stadium.name);
+            if (stadium.block != null) yaml.set(path + ".block", stadium.block.name());
             writeLocation(yaml, path + ".center", stadium.center);
             for (Team team : Team.values()) {
                 Location[] corners = stadium.goals.get(team);
@@ -314,6 +349,11 @@ final class StadiumManager implements CommandExecutor, TabCompleter {
         for (String key : section.getKeys(false)) {
             String path = "stadiums." + key;
             Stadium stadium = new Stadium(yaml.getString(path + ".name", key));
+            String blockName = yaml.getString(path + ".block");
+            if (blockName != null) {
+                Material block = Material.matchMaterial(blockName);
+                if (block != null && block.isBlock() && block.isItem()) stadium.block = block;
+            }
             stadium.center = readLocation(yaml, path + ".center");
             for (Team team : Team.values()) {
                 String goalPath = path + ".goals." + team.name().toLowerCase();

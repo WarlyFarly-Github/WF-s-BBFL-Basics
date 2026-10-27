@@ -26,7 +26,7 @@ import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
 
-public final class WFsBBRLBasics extends JavaPlugin implements Listener {
+public final class WFsBBFLBasics extends JavaPlugin implements Listener {
 
     private NamespacedKey whistleKey;
     private MatchManager matches;

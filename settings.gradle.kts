@@ -1,1 +1,1 @@
-rootProject.name = "WFs-BBRL-Basics"
+rootProject.name = "WFs-BBFL-Basics"

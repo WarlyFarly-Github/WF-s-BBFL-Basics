@@ -1,10 +1,10 @@
-name: WFs_BBRL_Basics
-prefix: "WF's BBRL Basics"
+name: WFs_BBFL_Basics
+prefix: "WF's BBFL Basics"
 version: 1.0.0
 author: WarlyFarly
-main: dev.whistle.WFsBBRLBasics
+main: dev.whistle.WFsBBFLBasics
 api-version: '26.3'
-description: Basic utilities for BBRL, including the admin Whistle and football matches.
+description: Basic utilities for BBFL, including the admin Whistle and football matches.
 commands:
   whistle:
     description: Gives you the Whistle.
@@ -13,20 +13,20 @@ commands:
   match:
     description: Create and manage football matches.
     usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline>
-    permission: wfsbbrl.match
+    permission: wfsbbfl.match
   stadium:
     description: Create stadiums, set centre points and goal areas.
-    usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight>
+    usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block>
 permissions:
   whistle.give:
     description: Allows use of /whistle
     default: op
-  wfsbbrl.match:
+  wfsbbfl.match:
     description: Allows use of /match
     default: true
-  wfsbbrl.bypass:
+  wfsbbfl.bypass:
     description: Allows /match create bypass (create a match with nobody else online)
     default: op
-  wfsbbrl.stadium:
+  wfsbbfl.stadium:
     description: Allows /stadium without the LuckPerms builder role
     default: op
