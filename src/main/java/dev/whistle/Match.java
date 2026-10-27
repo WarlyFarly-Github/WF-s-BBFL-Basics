@@ -45,6 +45,7 @@ final class Match {
     int redScore;
     int blueScore;
     boolean started;
+    boolean bypass; // created with /match create bypass: may start without players on both teams
     SulfurCube ball;
     Stadium stadium; // optional: gives the match a centre point and goal areas
     UUID lastKicker; // last match member to hit the ball

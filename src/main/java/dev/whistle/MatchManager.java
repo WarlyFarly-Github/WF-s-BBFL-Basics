@@ -9,6 +9,7 @@ import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
+import org.bukkit.DyeColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
@@ -35,7 +36,11 @@ import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
+import org.bukkit.block.banner.Pattern;
+import org.bukkit.block.banner.PatternType;
+import org.bukkit.inventory.meta.BannerMeta;
 import org.bukkit.inventory.meta.ItemMeta;
 import org.bukkit.inventory.meta.LeatherArmorMeta;
 import org.bukkit.inventory.meta.SkullMeta;
@@ -58,13 +63,26 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final int HALF_SECONDS = 5 * 60;   // length of each half
     private static final int COUNTDOWN_SECONDS = 5;   // break between the halves
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline");
+            List.of("create", "menu", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline");
 
     private record Invite(UUID host, Team team, long time) {}
 
-    /** Marks our chest GUI so clicks can be recognised. */
-    private static final class InviteGui implements InventoryHolder {
+    private enum MenuType { MAIN, TEAMS, STADIUMS, PLAYERS }
+
+    /** Marks one of our chest menus so clicks can be recognised, and remembers which one it is. */
+    private static final class MenuGui implements InventoryHolder {
+        private final MenuType type;
+        private final int page;   // 1-based, only used by the paged menus
+        private final int pages;  // total pages, only used by the paged menus
+        private final Team team;  // which team the player menu invites to
         private Inventory inventory;
+
+        private MenuGui(MenuType type, int page, int pages, Team team) {
+            this.type = type;
+            this.page = page;
+            this.pages = pages;
+            this.team = team;
+        }
 
         @Override
         public Inventory getInventory() {
@@ -72,15 +90,19 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
     }
 
-    /** Marks the stadium choice chest GUI. */
-    private static final class StadiumGui implements InventoryHolder {
-        private Inventory inventory;
-
-        @Override
-        public Inventory getInventory() {
-            return inventory;
-        }
-    }
+    // Slot layout (all menus are 3 rows).
+    private static final int SLOT_CANCEL = 10;
+    private static final int SLOT_INVITE = 12;
+    private static final int SLOT_STADIUM = 14;
+    private static final int SLOT_START = 16;
+    private static final int SLOT_RED_TEAM = 11;
+    private static final int SLOT_BLUE_TEAM = 15;
+    private static final int SLOT_PREVIOUS = 21;
+    private static final int SLOT_PAGE = 22;
+    private static final int SLOT_NEXT = 23;
+    private static final int SLOT_BACK = 26;
+    private static final int PAGE_SIZE = 18;   // two rows of heads
+    private static final int MAX_PAGES = 64;   // the page number is the banner's stack size
 
     private final JavaPlugin plugin;
     private final StadiumManager stadiums;
@@ -121,15 +143,21 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline>");
+            error(player, "Usage: /match <create|menu|invite|stadium|start|goal|end|leave|accept|decline>");
             return true;
         }
 
         switch (args[0].toLowerCase()) {
             case "create" -> create(player, args);
+            case "menu" -> {
+                Match match = hostedMatch(player);
+                if (match == null) return true;
+                if (match.started) error(player, "The match has already started. Use /match invite to add players.");
+                else openMainMenu(player);
+            }
             case "invite" -> {
                 Match match = hostedMatch(player);
-                if (match != null) openInviteGui(player);
+                if (match != null) openTeamMenu(player);
             }
             case "stadium" -> chooseStadium(player, args);
             case "start" -> start(player);
@@ -141,7 +169,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case "leave" -> leave(player);
             case "accept" -> accept(player);
             case "decline" -> decline(player);
-            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|start|goal|end|leave|accept|decline>");
+            default -> error(player, "Unknown subcommand. Use /match <create|menu|invite|stadium|start|goal|end|leave|accept|decline>");
         }
         return true;
     }
@@ -197,32 +225,41 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         Match match = new Match(host.getUniqueId());
+        match.bypass = bypass;
         matchByPlayer.put(host.getUniqueId(), match);
         host.sendMessage(Component.text("Match created! You are on the ", NamedTextColor.GREEN)
                 .append(Component.text("Red", NamedTextColor.RED, TextDecoration.BOLD))
-                .append(Component.text(" team. Choose a stadium, then use /match start to kick off.", NamedTextColor.GREEN)));
+                .append(Component.text(" team. Use the menu to choose a stadium, invite players and start.", NamedTextColor.GREEN)));
 
-        openStadiumGui(host);
-    }
-
-    /** Next step of /match create once the stadium is decided: the invite GUI (if anyone can be invited). */
-    private void afterStadiumChoice(Player host) {
-        boolean othersOnline = Bukkit.getOnlinePlayers().stream()
-                .anyMatch(p -> !p.getUniqueId().equals(host.getUniqueId()));
-        if (othersOnline) {
-            openInviteGui(host);
-        } else {
-            host.sendMessage(Component.text("Bypass used: nobody else is online, so there is no invite GUI.",
-                    NamedTextColor.YELLOW));
-        }
+        openMainMenu(host);
     }
 
     private void start(Player host) {
         Match match = hostedMatch(host);
         if (match == null) return;
+        beginMatch(host, match);
+    }
+
+    /** Why the match can't start yet, or null if it is ready. */
+    private String startProblem(Match match) {
         if (match.stadium == null) {
-            error(host, "You must choose a stadium before starting. Use /match stadium <name>.");
-            return;
+            return "You must choose a stadium before starting (Change Stadium, or /match stadium <name>).";
+        }
+        int red = match.size(Team.RED);
+        int blue = match.size(Team.BLUE);
+        if (!match.started && !match.bypass && (red == 0 || blue == 0)) {
+            return "Not enough players! Each team needs at least one player (Red " + red + ", Blue " + blue
+                    + "). Invite players and wait for them to accept.";
+        }
+        return null;
+    }
+
+    /** Starts the match (or moves the ball if it is already running). Returns false if it can't start yet. */
+    private boolean beginMatch(Player host, Match match) {
+        String problem = startProblem(match);
+        if (problem != null) {
+            error(host, problem);
+            return false;
         }
 
         boolean firstStart = !match.started;
@@ -242,6 +279,24 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         } else {
             host.sendMessage(Component.text("The ball was moved to your location.", NamedTextColor.YELLOW));
         }
+        return true;
+    }
+
+    /** Cancels a match that hasn't started: no overview, no announcements except to anyone who had already joined. */
+    private void cancelMatch(Match match) {
+        cancelTasks(match);
+        if (match.ball != null) match.ball.remove();
+        for (Player p : match.onlineMembers()) {
+            restoreChestplate(match, p);
+            match.hideBar(p);
+            if (!p.getUniqueId().equals(match.host)) {
+                p.sendMessage(Component.text("The host cancelled the match.", NamedTextColor.YELLOW));
+            }
+        }
+        for (UUID id : new ArrayList<>(matchByPlayer.keySet())) {
+            if (matchByPlayer.get(id) == match) matchByPlayer.remove(id);
+        }
+        invites.values().removeIf(invite -> invite.host().equals(match.host));
     }
 
     private void goal(Player host, String[] args) {
@@ -336,78 +391,6 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
     }
 
-    // ------------------------------------------------------------------ stadium GUI
-
-    private void openStadiumGui(Player host) {
-        List<String> names = stadiums.names();
-        if (names.size() > 54) names = names.subList(0, 54);
-
-        int rows = (names.size() - 1) / 9 + 1;
-        StadiumGui holder = new StadiumGui();
-        Inventory inventory = Bukkit.createInventory(holder, rows * 9,
-                Component.text("Choose a stadium", NamedTextColor.DARK_GRAY));
-        holder.inventory = inventory;
-
-        for (String name : names) {
-            inventory.addItem(createStadiumItem(stadiums.get(name)));
-        }
-
-        host.openInventory(inventory);
-    }
-
-    private ItemStack createStadiumItem(Stadium stadium) {
-        boolean ready = stadium.hasCenter() && stadium.goalComplete(Team.RED) && stadium.goalComplete(Team.BLUE);
-        ItemStack item = new ItemStack(ready ? Material.GRASS_BLOCK : Material.DIRT);
-        ItemMeta meta = item.getItemMeta();
-        meta.displayName(Component.text(stadium.name, NamedTextColor.GREEN, TextDecoration.BOLD)
-                .decoration(TextDecoration.ITALIC, false));
-        meta.lore(List.of(
-                statusLore("Centre point", stadium.hasCenter()),
-                statusLore("Red goal", stadium.goalComplete(Team.RED)),
-                statusLore("Blue goal", stadium.goalComplete(Team.BLUE)),
-                Component.empty(),
-                Component.text("Click to select", NamedTextColor.YELLOW).decoration(TextDecoration.ITALIC, false)));
-        meta.getPersistentDataContainer().set(stadiumKey, PersistentDataType.STRING, stadium.name);
-        item.setItemMeta(meta);
-        return item;
-    }
-
-    private Component statusLore(String label, boolean set) {
-        return Component.text(label + ": ", NamedTextColor.GRAY)
-                .append(set ? Component.text("set", NamedTextColor.GREEN) : Component.text("not set", NamedTextColor.RED))
-                .decoration(TextDecoration.ITALIC, false);
-    }
-
-    @EventHandler
-    public void onStadiumClick(InventoryClickEvent event) {
-        if (!(event.getView().getTopInventory().getHolder() instanceof StadiumGui)) return;
-        event.setCancelled(true);
-
-        if (event.getClickedInventory() != event.getView().getTopInventory()) return;
-        if (!(event.getWhoClicked() instanceof Player host)) return;
-
-        ItemStack item = event.getCurrentItem();
-        if (item == null || !item.hasItemMeta()) return;
-        String choice = item.getItemMeta().getPersistentDataContainer().get(stadiumKey, PersistentDataType.STRING);
-        if (choice == null) return;
-
-        Match match = matchByPlayer.get(host.getUniqueId());
-        if (match == null || !match.host.equals(host.getUniqueId())) {
-            host.closeInventory();
-            return;
-        }
-
-        Stadium stadium = stadiums.get(choice);
-        if (stadium == null) {
-            error(host, "That stadium no longer exists.");
-            return;
-        }
-        applyStadium(host, match, stadium);
-
-        // Swap to the invite GUI on the next tick rather than inside the click event.
-        Bukkit.getScheduler().runTask(plugin, () -> afterStadiumChoice(host));
-    }
-
     /** Where the ball is placed during freezes: the stadium centre if there is one. */
     private Location ballSpawnPoint(Match match) {
         if (match.stadium != null && match.stadium.hasCenter()) return match.stadium.center.clone();
@@ -490,75 +473,279 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return match;
     }
 
-    // ------------------------------------------------------------------ invite GUI
+    // ------------------------------------------------------------------ menus
 
-    private void openInviteGui(Player host) {
-        List<Player> others = new ArrayList<>();
-        for (Player p : Bukkit.getOnlinePlayers()) {
-            if (!p.getUniqueId().equals(host.getUniqueId())) others.add(p);
-        }
-        if (others.isEmpty()) {
-            error(host, "There are no other players online!");
-            return;
-        }
-        if (others.size() > 54) others = others.subList(0, 54);
+    private static Component plain(String text, NamedTextColor color) {
+        return Component.text(text, color).decoration(TextDecoration.ITALIC, false);
+    }
 
-        int rows = (others.size() - 1) / 9 + 1;
-        InviteGui holder = new InviteGui();
-        Inventory inventory = Bukkit.createInventory(holder, rows * 9,
-                Component.text("Invite players", NamedTextColor.DARK_GRAY));
+    private static Component bold(String text, NamedTextColor color) {
+        return Component.text(text, color, TextDecoration.BOLD).decoration(TextDecoration.ITALIC, false);
+    }
+
+    private ItemStack button(Material material, String name, NamedTextColor color, Component... lore) {
+        ItemStack item = new ItemStack(material);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(bold(name, color));
+        if (lore.length > 0) meta.lore(List.of(lore));
+        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES, ItemFlag.HIDE_ADDITIONAL_TOOLTIP);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private Inventory newMenu(MenuGui holder, String title) {
+        Inventory inventory = Bukkit.createInventory(holder, 27, Component.text(title, NamedTextColor.DARK_GRAY));
         holder.inventory = inventory;
+        return inventory;
+    }
 
-        for (Player other : others) {
-            inventory.addItem(createHead(other));
-        }
+    /** The host's own match, only if it hasn't been taken away from under an open menu. */
+    private Match menuMatch(Player host) {
+        Match match = matchByPlayer.get(host.getUniqueId());
+        if (match == null || !match.host.equals(host.getUniqueId())) return null;
+        return match;
+    }
+
+    /** First menu of /match create: cancel, invite, change stadium, start. */
+    private void openMainMenu(Player host) {
+        Match match = menuMatch(host);
+        if (match == null) return;
+
+        MenuGui holder = new MenuGui(MenuType.MAIN, 0, 0, null);
+        Inventory inventory = newMenu(holder, "Match Setup");
+
+        inventory.setItem(SLOT_CANCEL, button(Material.RED_CONCRETE, "Cancel Match", NamedTextColor.RED,
+                plain("Cancels this match.", NamedTextColor.GRAY)));
+        inventory.setItem(SLOT_INVITE, button(Material.DIAMOND, "Invite Players", NamedTextColor.BLUE,
+                plain("Red: " + match.size(Team.RED) + "/" + Match.MAX_PER_TEAM
+                        + "   Blue: " + match.size(Team.BLUE) + "/" + Match.MAX_PER_TEAM, NamedTextColor.GRAY)));
+        inventory.setItem(SLOT_STADIUM, button(Material.BIRCH_LOG, "Change Stadium", NamedTextColor.BLUE,
+                plain("Current: " + (match.stadium == null ? "none chosen" : match.stadium.name), NamedTextColor.GRAY)));
+        inventory.setItem(SLOT_START, button(Material.LIME_CONCRETE, "Start Match", NamedTextColor.GREEN));
         host.openInventory(inventory);
+    }
+
+    /** Invite menu: pick which team to invite players to. */
+    private void openTeamMenu(Player host) {
+        Match match = menuMatch(host);
+        if (match == null) return;
+
+        MenuGui holder = new MenuGui(MenuType.TEAMS, 0, 0, null);
+        Inventory inventory = newMenu(holder, "Choose Team");
+        inventory.setItem(SLOT_RED_TEAM, teamItem(match, Team.RED));
+        inventory.setItem(SLOT_BLUE_TEAM, teamItem(match, Team.BLUE));
+        inventory.setItem(SLOT_BACK, backButton());
+        host.openInventory(inventory);
+    }
+
+    private ItemStack teamItem(Match match, Team team) {
+        ItemStack item = button(Material.LEATHER_CHESTPLATE, team.label + " Team", team.color,
+                plain(match.size(team) + "/" + Match.MAX_PER_TEAM + " players", NamedTextColor.GRAY));
+        LeatherArmorMeta meta = (LeatherArmorMeta) item.getItemMeta();
+        meta.setColor(Color.fromRGB(team.color.value()));
+        meta.addItemFlags(ItemFlag.HIDE_DYE);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private ItemStack backButton() {
+        return button(Material.OAK_DOOR, "Back", NamedTextColor.DARK_BLUE);
+    }
+
+    /** The stadium list (MenuType.STADIUMS) and the player list for a team (MenuType.PLAYERS) share one layout. */
+    private void openPagedMenu(Player host, MenuType type, int page, Team team) {
+        Match match = menuMatch(host);
+        if (match == null) return;
+
+        List<ItemStack> entries = new ArrayList<>();
+        if (type == MenuType.STADIUMS) {
+            for (String name : stadiums.names()) {
+                Stadium stadium = stadiums.get(name);
+                if (stadium != null) entries.add(createStadiumItem(stadium));
+            }
+        } else {
+            for (Player other : Bukkit.getOnlinePlayers()) {
+                if (other.getUniqueId().equals(host.getUniqueId())) continue;
+                if (matchByPlayer.containsKey(other.getUniqueId())) continue;
+                entries.add(createHead(other));
+            }
+        }
+
+        int pages = Math.max(1, Math.min(MAX_PAGES, (entries.size() + PAGE_SIZE - 1) / PAGE_SIZE));
+        page = Math.max(1, Math.min(page, pages));
+
+        MenuGui holder = new MenuGui(type, page, pages, team);
+        String title = type == MenuType.STADIUMS ? "Choose Stadium" : "Invite to " + team.label + " Team";
+        Inventory inventory = newMenu(holder, title);
+
+        for (int i = 0; i < PAGE_SIZE; i++) {
+            int index = (page - 1) * PAGE_SIZE + i;
+            if (index >= entries.size()) break;
+            inventory.setItem(i, entries.get(index));
+        }
+
+        inventory.setItem(SLOT_PREVIOUS, arrowBanner("Previous Page", false));
+        inventory.setItem(SLOT_PAGE, pageBanner(page, pages));
+        inventory.setItem(SLOT_NEXT, arrowBanner("Next Page", true));
+        inventory.setItem(SLOT_BACK, backButton());
+        host.openInventory(inventory);
+    }
+
+    /** White banner with a red arrow: the lozenge with one half covered. */
+    private ItemStack arrowBanner(String name, boolean next) {
+        ItemStack item = new ItemStack(Material.WHITE_BANNER);
+        BannerMeta meta = (BannerMeta) item.getItemMeta();
+        meta.addPattern(new Pattern(DyeColor.RED, PatternType.RHOMBUS));
+        meta.addPattern(new Pattern(DyeColor.WHITE, next ? PatternType.HALF_VERTICAL : PatternType.HALF_VERTICAL_RIGHT));
+        meta.displayName(bold(name, NamedTextColor.WHITE));
+        meta.addItemFlags(ItemFlag.HIDE_ADDITIONAL_TOOLTIP);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    /** Plain white banner whose stack size is the current page number. */
+    private ItemStack pageBanner(int page, int pages) {
+        ItemStack item = new ItemStack(Material.WHITE_BANNER, page);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(bold("Page Number", NamedTextColor.WHITE));
+        meta.lore(List.of(plain("Page " + page + " of " + pages, NamedTextColor.GRAY)));
+        meta.addItemFlags(ItemFlag.HIDE_ADDITIONAL_TOOLTIP);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private ItemStack createStadiumItem(Stadium stadium) {
+        ItemStack item = new ItemStack(Material.PLAYER_HEAD);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(bold(stadium.name, NamedTextColor.GOLD));
+        meta.lore(List.of(
+                statusLore("Centre point", stadium.hasCenter()),
+                statusLore("Red goal", stadium.goalComplete(Team.RED)),
+                statusLore("Blue goal", stadium.goalComplete(Team.BLUE)),
+                Component.empty(),
+                plain("Click to select", NamedTextColor.YELLOW)));
+        meta.getPersistentDataContainer().set(stadiumKey, PersistentDataType.STRING, stadium.name);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private Component statusLore(String label, boolean set) {
+        return Component.text(label + ": ", NamedTextColor.GRAY)
+                .append(set ? Component.text("set", NamedTextColor.GREEN) : Component.text("not set", NamedTextColor.RED))
+                .decoration(TextDecoration.ITALIC, false);
     }
 
     private ItemStack createHead(Player target) {
         ItemStack head = new ItemStack(Material.PLAYER_HEAD);
         SkullMeta meta = (SkullMeta) head.getItemMeta();
         meta.setPlayerProfile(target.getPlayerProfile());
-        meta.displayName(Component.text(target.getName(), NamedTextColor.WHITE)
-                .decoration(TextDecoration.ITALIC, false));
-        meta.lore(List.of(
-                Component.text("Left-click: invite to ", NamedTextColor.GRAY)
-                        .append(Component.text("Red", NamedTextColor.RED))
-                        .decoration(TextDecoration.ITALIC, false),
-                Component.text("Right-click: invite to ", NamedTextColor.GRAY)
-                        .append(Component.text("Blue", NamedTextColor.BLUE))
-                        .decoration(TextDecoration.ITALIC, false)));
+        meta.displayName(bold(target.getName(), NamedTextColor.GOLD));
+        meta.lore(List.of(plain("Click to invite", NamedTextColor.YELLOW)));
         meta.getPersistentDataContainer().set(targetKey, PersistentDataType.STRING,
                 target.getUniqueId().toString());
         head.setItemMeta(meta);
         return head;
     }
 
+    /** Menu clicks only ever act on the next tick, never inside the click event. */
+    private void later(Runnable action) {
+        Bukkit.getScheduler().runTask(plugin, action);
+    }
+
     @EventHandler
-    public void onInviteClick(InventoryClickEvent event) {
-        if (!(event.getView().getTopInventory().getHolder() instanceof InviteGui)) return;
+    public void onMenuClick(InventoryClickEvent event) {
+        if (!(event.getView().getTopInventory().getHolder() instanceof MenuGui menu)) return;
         event.setCancelled(true);
 
         if (event.getClickedInventory() != event.getView().getTopInventory()) return;
         if (!(event.getWhoClicked() instanceof Player host)) return;
+        if (event.getCurrentItem() == null) return;
 
-        ItemStack item = event.getCurrentItem();
-        if (item == null || !item.hasItemMeta()) return;
-        String id = item.getItemMeta().getPersistentDataContainer().get(targetKey, PersistentDataType.STRING);
-        if (id == null) return;
-
-        Player target = Bukkit.getPlayer(UUID.fromString(id));
-        if (target == null) {
-            error(host, "That player is no longer online.");
+        Match match = menuMatch(host);
+        if (match == null) {
+            later(host::closeInventory);
             return;
         }
-        invite(host, target, event.isRightClick() ? Team.BLUE : Team.RED);
+
+        int slot = event.getSlot();
+        switch (menu.type) {
+            case MAIN -> {
+                if (match.started) {
+                    later(host::closeInventory);
+                    return;
+                }
+                switch (slot) {
+                    case SLOT_CANCEL -> later(() -> {
+                        host.closeInventory();
+                        cancelMatch(match);
+                    });
+                    case SLOT_INVITE -> later(() -> openTeamMenu(host));
+                    case SLOT_STADIUM -> later(() -> openPagedMenu(host, MenuType.STADIUMS, 1, null));
+                    case SLOT_START -> later(() -> {
+                        if (beginMatch(host, match)) host.closeInventory();
+                        else openMainMenu(host); // not ready: warn in chat and show the menu again
+                    });
+                    default -> { }
+                }
+            }
+            case TEAMS -> {
+                switch (slot) {
+                    case SLOT_RED_TEAM -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, Team.RED));
+                    case SLOT_BLUE_TEAM -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, Team.BLUE));
+                    case SLOT_BACK -> later(() -> {
+                        if (match.started) host.closeInventory();
+                        else openMainMenu(host);
+                    });
+                    default -> { }
+                }
+            }
+            case STADIUMS, PLAYERS -> {
+                if (slot == SLOT_BACK) {
+                    later(() -> {
+                        if (menu.type == MenuType.PLAYERS) openTeamMenu(host);
+                        else openMainMenu(host);
+                    });
+                } else if (slot == SLOT_PREVIOUS || slot == SLOT_NEXT) {
+                    int target = menu.page + (slot == SLOT_NEXT ? 1 : -1);
+                    if (target >= 1 && target <= menu.pages) {
+                        later(() -> openPagedMenu(host, menu.type, target, menu.team));
+                    }
+                } else if (slot < PAGE_SIZE) {
+                    handleEntryClick(host, match, menu, event.getCurrentItem());
+                }
+            }
+        }
+    }
+
+    private void handleEntryClick(Player host, Match match, MenuGui menu, ItemStack item) {
+        if (!item.hasItemMeta()) return;
+        var data = item.getItemMeta().getPersistentDataContainer();
+
+        if (menu.type == MenuType.STADIUMS) {
+            String choice = data.get(stadiumKey, PersistentDataType.STRING);
+            if (choice == null) return;
+            Stadium stadium = stadiums.get(choice);
+            if (stadium == null) {
+                error(host, "That stadium no longer exists.");
+                return;
+            }
+            applyStadium(host, match, stadium);
+            later(() -> openMainMenu(host));
+        } else {
+            String id = data.get(targetKey, PersistentDataType.STRING);
+            if (id == null) return;
+            Player target = Bukkit.getPlayer(UUID.fromString(id));
+            if (target == null) {
+                error(host, "That player is no longer online.");
+                return;
+            }
+            invite(host, target, menu.team);
+        }
     }
 
     @EventHandler
-    public void onInviteDrag(InventoryDragEvent event) {
-        InventoryHolder holder = event.getView().getTopInventory().getHolder();
-        if (holder instanceof InviteGui || holder instanceof StadiumGui) {
+    public void onMenuDrag(InventoryDragEvent event) {
+        if (event.getView().getTopInventory().getHolder() instanceof MenuGui) {
             event.setCancelled(true);
         }
     }
