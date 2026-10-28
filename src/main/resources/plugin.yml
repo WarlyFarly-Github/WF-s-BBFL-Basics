@@ -21,7 +21,7 @@ commands:
     permission: wfsbbfl.votematch
   stadium:
     description: Create stadiums, set centre points and goal areas.
-    usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3>
+    usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>
 permissions:
   whistle.give:
     description: Allows use of /whistle

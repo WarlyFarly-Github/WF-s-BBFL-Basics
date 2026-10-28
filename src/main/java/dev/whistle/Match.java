@@ -20,10 +20,10 @@ import java.util.Map;
 import java.util.Set;
 import java.util.UUID;
 
-/** One football match: two teams of up to 3, a score and a bossbar. */
+/** One football match: two teams of up to 5 (10 players in total), a score and a bossbar. */
 final class Match {
 
-    static final int MAX_PER_TEAM = 3;
+    static final int MAX_PER_TEAM = 5;
 
     enum Team {
         RED("Red", NamedTextColor.RED),

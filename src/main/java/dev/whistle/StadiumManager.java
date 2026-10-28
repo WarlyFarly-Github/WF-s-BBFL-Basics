@@ -37,7 +37,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
 
     private static final Pattern VALID_NAME = Pattern.compile("[A-Za-z0-9_-]{1,32}");
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "delete", "list", "info", "setcentre", "setgoal", "goalheight", "block", "confirm", "edit", "invite", "uninvite", "claim", "bounds", "setpos1", "setpos2", "setpos3");
+            List.of("create", "delete", "list", "info", "setcentre", "setgoal", "goalheight", "block", "confirm", "edit", "invite", "uninvite", "claim", "bounds", "setpos1", "setpos2", "setpos3", "setpos4", "setpos5");
 
     private final JavaPlugin plugin;
     private final File file;
@@ -86,7 +86,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3>");
+            error(player, "Usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>");
             return true;
         }
 
@@ -108,7 +108,9 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
             case "setpos1" -> setPosition(player, args, 0);
             case "setpos2" -> setPosition(player, args, 1);
             case "setpos3" -> setPosition(player, args, 2);
-            default -> error(player, "Unknown subcommand. Use /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3>");
+            case "setpos4" -> setPosition(player, args, 3);
+            case "setpos5" -> setPosition(player, args, 4);
+            default -> error(player, "Unknown subcommand. Use /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>");
         }
         return true;
     }
@@ -121,7 +123,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
             return filter(SUBCOMMANDS, args[0]);
         }
         String sub = args[0].toLowerCase();
-        if (sub.equals("setpos1") || sub.equals("setpos2") || sub.equals("setpos3")) {
+        if (sub.matches("setpos[1-5]")) {
             if (args.length == 2) {
                 List<String> options = new ArrayList<>(names());
                 options.addAll(List.of("red", "blue"));
@@ -204,7 +206,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
         player.sendMessage(Component.text("Created stadium " + name + ". Next: ", NamedTextColor.GREEN)
                 .append(Component.text("/stadium setcentre " + name + "  and  /stadium setgoal " + name
                         + " <red|blue> <pos1|pos2|pos3|pos4>", NamedTextColor.YELLOW))
-                .append(Component.text(", plus /stadium bounds and /stadium setpos1|setpos2|setpos3 <red|blue>. Finish with /stadium confirm.",
+                .append(Component.text(", plus /stadium bounds and /stadium setpos1 to setpos5 <red|blue>. Finish with /stadium confirm.",
                         NamedTextColor.GREEN)));
     }
 
@@ -246,7 +248,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
         for (Team team : Team.values()) {
             int set = stadium.positionsSet(team);
             player.sendMessage(statusLine(team.label + " player positions",
-                    set == 0 ? null : set + "/" + Stadium.POSITIONS_PER_TEAM + (set < Stadium.POSITIONS_PER_TEAM ? " (needs all 3)" : " set")));
+                    set == 0 ? null : set + "/" + Stadium.POSITIONS_PER_TEAM + (set < Stadium.POSITIONS_PER_TEAM ? " (needs all " + Stadium.POSITIONS_PER_TEAM + ")" : " set")));
         }
         player.sendMessage(statusLine("Centre point", stadium.hasCenter() ? describe(stadium.center) : null));
         for (Team team : Team.values()) {
@@ -459,7 +461,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
         }
     }
 
-    /** /stadium setpos1|setpos2|setpos3 [stadium] <red|blue>: where one of the team's players stands during freezes. */
+    /** /stadium setpos1 to setpos5 [stadium] <red|blue>: where one of the team's players stands during freezes. */
     private void setPosition(Player player, String[] args, int index) {
         String sub = "setpos" + (index + 1);
         String usage = "Usage: /stadium " + sub + " [stadium] <red|blue>  (stand where the player should be placed)";

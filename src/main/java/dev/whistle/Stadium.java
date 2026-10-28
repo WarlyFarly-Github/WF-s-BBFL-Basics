@@ -18,7 +18,7 @@ final class Stadium {
     static final int GOAL_CORNERS = 4;
     static final double DEFAULT_GOAL_HEIGHT = 3.0;
     static final int MAX_BOUNDS_POINTS = 32;
-    static final int POSITIONS_PER_TEAM = 3;
+    static final int POSITIONS_PER_TEAM = 5;
 
     final String name;
 
@@ -53,7 +53,7 @@ final class Stadium {
     final Map<Team, Location[]> goals = new EnumMap<>(Team.class);
 
     /**
-     * Where each team's players stand during a freeze (setpos1..setpos3). Players are shuffled between these each
+     * Where each team's players stand during a freeze (setpos1..setpos5). Players are shuffled between these each
      * freeze. Keyed by team.
      */
     final Map<Team, Location[]> positions = new EnumMap<>(Team.class);
