@@ -56,7 +56,7 @@ gradle build
 
 ## Development Status
 
-The plugin is being actively developed, and hasn't got a fully finished "1.0" yet, hence why there are no builds. We are working to get this done ASAP!
+The plugin is being actively developed, and we hope to get new versions out ASAP. If you have any bugs or features you want, leave it in issues!
 
 **Developer:** WarlyFarly  
 **Server:** BBFL  
