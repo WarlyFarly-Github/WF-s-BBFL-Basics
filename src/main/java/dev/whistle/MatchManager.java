@@ -11,8 +11,8 @@ import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
-import org.bukkit.DyeColor;
 import org.bukkit.GameMode;
+import org.bukkit.DyeColor;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.OfflinePlayer;
@@ -66,8 +66,7 @@ import java.util.UUID;
 final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private static final long INVITE_TIMEOUT_MS = 60_000;
-    private static final int HALF_SECONDS = 5 * 60;   // length of each half
-    private static final int COUNTDOWN_SECONDS = 5;   // break between the halves
+    private static final int COUNTDOWN_SECONDS = 5;   // length of every freeze
     private static final List<String> SUBCOMMANDS =
             List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline");
 
@@ -128,6 +127,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     /** Name tag colours go through TAB when it is installed, because TAB overrides scoreboard teams. */
     private final TabNameTags tabNames;
 
+    /** Set after construction; quickmatch lobbies reserve stadiums and hold players who haven't joined yet. */
+    private QuickMatchManager quick;
+
+    void setQuickMatches(QuickMatchManager quick) {
+        this.quick = quick;
+    }
+
     MatchManager(JavaPlugin plugin, StadiumManager stadiums) {
         this.plugin = plugin;
         this.tabNames = new TabNameTags(plugin);
@@ -146,10 +152,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     void shutdown() {
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
-            m.onlineMembers().forEach(p -> {
-                restoreChestplate(m, p);
-                restoreGameMode(m, p);
-            });
+            m.onlineMembers().forEach(p -> restoreChestplate(m, p));
             if (m.ball != null) m.ball.remove();
         });
         removeScoreboardTeams();
@@ -211,6 +214,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void create(Player host, String[] args) {
+        if (!host.hasPermission("wfsbbfl.match.create")) {
+            error(host, "Only operators can start league matches. Use /votematch <stadium> [minutes] to vote for a quickmatch.");
+            return;
+        }
         boolean bypass = false;
         if (args.length >= 2) {
             if (!args[1].equalsIgnoreCase("bypass")) {
@@ -264,6 +271,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return "The stadium " + match.stadium.name + " isn't finished (still needs: "
                     + String.join(", ", match.stadium.missingParts()) + "). Choose another stadium.";
         }
+        if (!match.started && (stadiumInUse(match.stadium) || (quick != null && quick.isReserved(match.stadium)))) {
+            return "The stadium " + match.stadium.name + " is being used by another match right now.";
+        }
         int red = match.size(Team.RED);
         int blue = match.size(Team.BLUE);
         if (!match.started && !match.bypass && (red == 0 || blue == 0)) {
@@ -292,7 +302,6 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 match.startPositions.put(p.getUniqueId(), p.getLocation().clone());
                 match.showBar(p);
                 giveJersey(match, p);
-                enterAdventure(match, p);
             }
             match.broadcast(Component.text("The match has started!", NamedTextColor.GREEN, TextDecoration.BOLD));
             startTimer(match);
@@ -302,13 +311,53 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return true;
     }
 
+    boolean isInMatch(UUID id) {
+        return matchByPlayer.containsKey(id);
+    }
+
+    /** True if a running match is being played on this stadium. */
+    boolean stadiumInUse(Stadium stadium) {
+        return matchByPlayer.values().stream().anyMatch(m -> m.started && m.stadium == stadium);
+    }
+
+    /**
+     * Starts a quickmatch for these players: teams are shuffled and balanced, then the normal 5 second frozen
+     * start countdown runs. Returns false if it can't start (fewer than 2 players, or the stadium is taken).
+     */
+    boolean startQuickMatch(Stadium stadium, int minutes, List<Player> players) {
+        List<Player> ready = new ArrayList<>(players.stream()
+                .filter(p -> p.isOnline() && !matchByPlayer.containsKey(p.getUniqueId())).toList());
+        if (ready.size() < 2 || !stadium.isComplete() || stadiumInUse(stadium)) return false;
+
+        Match match = new Match();
+        match.stadium = stadium;
+        match.playSeconds = minutes * 60;
+        match.started = true;
+        match.ballStart = stadium.center.clone();
+
+        Collections.shuffle(ready);
+        for (int i = 0; i < ready.size(); i++) {
+            Team team = i % 2 == 0 ? Team.RED : Team.BLUE;
+            Player p = ready.get(i);
+            match.add(p.getUniqueId(), team);
+            matchByPlayer.put(p.getUniqueId(), match);
+            match.startPositions.put(p.getUniqueId(), p.getLocation().clone());
+            match.showBar(p);
+            giveJersey(match, p);
+            p.sendMessage(Component.text("The quickmatch has started! You are on the ", NamedTextColor.GREEN)
+                    .append(Component.text(team.label, team.color, TextDecoration.BOLD))
+                    .append(Component.text(" team.", NamedTextColor.GREEN)));
+        }
+        startTimer(match);
+        return true;
+    }
+
     /** Cancels a match that hasn't started: no overview, no announcements except to anyone who had already joined. */
     private void cancelMatch(Match match) {
         cancelTasks(match);
         if (match.ball != null) match.ball.remove();
         for (Player p : match.onlineMembers()) {
             restoreChestplate(match, p);
-            restoreGameMode(match, p);
             match.hideBar(p);
             if (!p.getUniqueId().equals(match.host)) {
                 p.sendMessage(Component.text("The host cancelled the match.", NamedTextColor.YELLOW));
@@ -343,6 +392,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     /** Whoever last kicked the ball, otherwise the host. */
     private String lastScorerName(Match match) {
         UUID id = match.lastKicker != null ? match.lastKicker : match.host;
+        if (id == null) return "Unknown";
         String name = Bukkit.getOfflinePlayer(id).getName();
         return name != null ? name : "Unknown";
     }
@@ -439,18 +489,27 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void leave(Player player) {
+        if (quick != null && quick.leaveLobby(player)) return; // waiting in a quickmatch lobby
         Match match = matchByPlayer.get(player.getUniqueId());
         if (match == null) {
             error(player, "You are not in a match.");
             return;
         }
-        if (match.host.equals(player.getUniqueId())) {
+        if (player.getUniqueId().equals(match.host)) {
             endMatch(match, player.getName() + " (the host) left, so the match was ended.");
             return;
         }
         removeMember(match, player);
         player.sendMessage(Component.text("You left the match.", NamedTextColor.YELLOW));
         match.broadcast(Component.text(player.getName() + " left the match.", NamedTextColor.YELLOW));
+        endQuickMatchIfEmpty(match);
+    }
+
+    /** A quickmatch can't carry on once a whole team has gone. */
+    private void endQuickMatchIfEmpty(Match match) {
+        if (match.quick && (match.size(Team.RED) == 0 || match.size(Team.BLUE) == 0)) {
+            endMatch(match, "Not enough players are left, so the quickmatch was ended.");
+        }
     }
 
     private void accept(Player player) {
@@ -460,7 +519,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
         Match match = matchByPlayer.get(invite.host());
-        if (match == null || !match.host.equals(invite.host())) {
+        if (match == null || !invite.host().equals(match.host)) {
             error(player, "That match no longer exists.");
             return;
         }
@@ -479,7 +538,6 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             match.showBar(player);
             match.startPositions.putIfAbsent(player.getUniqueId(), player.getLocation().clone());
             giveJersey(match, player);
-            enterAdventure(match, player);
         }
 
         match.broadcast(Component.text(player.getName(), NamedTextColor.YELLOW)
@@ -508,7 +566,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(player, "You don't have a match. Use /match create first.");
             return null;
         }
-        if (!match.host.equals(player.getUniqueId())) {
+        if (!player.getUniqueId().equals(match.host)) {
             error(player, "Only the match host can do that.");
             return null;
         }
@@ -544,7 +602,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     /** The host's own match, only if it hasn't been taken away from under an open menu. */
     private Match menuMatch(Player host) {
         Match match = matchByPlayer.get(host.getUniqueId());
-        if (match == null || !match.host.equals(host.getUniqueId())) return null;
+        if (match == null || !host.getUniqueId().equals(match.host)) return null;
         return match;
     }
 
@@ -812,7 +870,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private void invite(Player host, Player target, Team team) {
         Match match = matchByPlayer.get(host.getUniqueId());
-        if (match == null || !match.host.equals(host.getUniqueId())) return;
+        if (match == null || !host.getUniqueId().equals(match.host)) return;
 
         if (matchByPlayer.containsKey(target.getUniqueId())) {
             error(host, target.getName() + " is already in a match.");
@@ -935,7 +993,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     /** Starts the match: a 5 second freeze, then the first half. */
     private void startTimer(Match match) {
-        match.secondsLeft = HALF_SECONDS;
+        match.secondsLeft = match.playSeconds;
         match.timerTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> tickTimer(match), 20L, 20L);
         beginCountdown(match, Match.CountdownType.START, Match.Phase.FIRST_HALF);
     }
@@ -949,8 +1007,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             updateTimerBar(match);
             return;
         }
-        if (match.phase == Match.Phase.FIRST_HALF) {
-            match.secondsLeft = HALF_SECONDS;
+        if (!match.quick && match.phase == Match.Phase.FIRST_HALF) {
+            match.secondsLeft = match.playSeconds;
             beginCountdown(match, Match.CountdownType.HALF_TIME, Match.Phase.SECOND_HALF);
         } else {
             endMatch(match, "Full time!");
@@ -1074,10 +1132,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private void updateTimerBar(Match match) {
         int seconds = Math.max(match.secondsLeft, 0);
         String time = String.format("%d:%02d", seconds / 60, seconds % 60);
-        String half = match.phase == Match.Phase.FIRST_HALF ? "First Half" : "Second Half";
+        String half = match.quick ? "Quickmatch"
+                : match.phase == Match.Phase.FIRST_HALF ? "First Half" : "Second Half";
 
         match.timerBar.color(BossBar.Color.YELLOW);
-        match.timerBar.progress(Math.min(1.0f, seconds / (float) HALF_SECONDS));
+        match.timerBar.progress(Math.min(1.0f, seconds / (float) match.playSeconds));
         match.timerBar.name(Component.text(half + " - " + time, NamedTextColor.YELLOW, TextDecoration.BOLD));
     }
 
@@ -1140,27 +1199,19 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 current == null || isJersey(current) ? new ItemStack(Material.AIR) : current);
         player.getInventory().setChestplate(createJersey(match.teamOf(player.getUniqueId())));
         applyNameColor(player, match.teamOf(player.getUniqueId()));
+
+        // Everyone plays in adventure mode (no breaking or placing blocks); the old mode comes back afterwards.
+        match.savedGameModes.putIfAbsent(player.getUniqueId(), player.getGameMode());
+        player.setGameMode(GameMode.ADVENTURE);
     }
 
     private void restoreChestplate(Match match, Player player) {
         clearNameColor(player);
+        GameMode savedMode = match.savedGameModes.remove(player.getUniqueId());
+        if (savedMode != null) player.setGameMode(savedMode);
         ItemStack saved = match.savedChestplates.remove(player.getUniqueId());
         if (saved == null) return;
         player.getInventory().setChestplate(saved.getType() == Material.AIR ? null : saved);
-    }
-
-    // ------------------------------------------------------------------ game mode
-
-    /** Puts the player in Adventure mode for the match, remembering the mode they were in before. */
-    private void enterAdventure(Match match, Player player) {
-        match.savedGameModes.putIfAbsent(player.getUniqueId(), player.getGameMode());
-        if (player.getGameMode() != GameMode.ADVENTURE) player.setGameMode(GameMode.ADVENTURE);
-    }
-
-    /** Gives the player back the game mode they had before the match. */
-    private void restoreGameMode(Match match, Player player) {
-        GameMode saved = match.savedGameModes.remove(player.getUniqueId());
-        if (saved != null) player.setGameMode(saved);
     }
 
     // ------------------------------------------------------------------ name tag colours
@@ -1255,17 +1306,17 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         Match match = matchByPlayer.get(player.getUniqueId());
         if (match == null) return;
-        if (match.host.equals(player.getUniqueId())) {
+        if (player.getUniqueId().equals(match.host)) {
             endMatch(match, player.getName() + " (the host) left, so the match was ended.");
         } else {
             removeMember(match, player);
             match.broadcast(Component.text(player.getName() + " left the match.", NamedTextColor.YELLOW));
+            endQuickMatchIfEmpty(match);
         }
     }
 
     private void removeMember(Match match, Player player) {
         restoreChestplate(match, player);
-        restoreGameMode(match, player);
         match.remove(player.getUniqueId());
         matchByPlayer.remove(player.getUniqueId());
         match.hideBar(player);
@@ -1288,7 +1339,6 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         for (Player p : match.onlineMembers()) {
             restoreChestplate(match, p);
-            restoreGameMode(match, p);
             match.hideBar(p);
             p.sendMessage(message);
             p.sendMessage(overview);

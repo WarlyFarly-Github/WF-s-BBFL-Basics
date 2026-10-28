@@ -42,7 +42,9 @@ final class Match {
 
     enum CountdownType { START, HALF_TIME, GOAL }
 
-    final UUID host;
+    final UUID host; // null for quickmatches, which have no host
+    boolean quick;   // quickmatch: one period, no half time
+    int playSeconds = 5 * 60; // length of each half (league) or of the whole match (quick)
     int redScore;
     int blueScore;
     boolean started;
@@ -66,15 +68,15 @@ final class Match {
     // Where everyone (and the ball) were when the match started, used to reset after the first half.
     final Map<UUID, Location> startPositions = new HashMap<>();
 
+    /** Each player's game mode from before the match, put back when they leave it. */
+    final Map<UUID, GameMode> savedGameModes = new HashMap<>();
+
     /** Which of the team's stadium positions (0-2) each player was put on last freeze, so nobody repeats one. */
     final Map<UUID, Integer> lastPosition = new HashMap<>();
     Location ballStart;
 
     // Each player's own chestplate, put back when they leave or the match ends.
     final Map<UUID, ItemStack> savedChestplates = new HashMap<>();
-
-    // Each player's own game mode, put back when they leave or the match ends (players are in Adventure during a match).
-    final Map<UUID, GameMode> savedGameModes = new HashMap<>();
 
     private final Set<UUID> red = new LinkedHashSet<>();
     private final Set<UUID> blue = new LinkedHashSet<>();
@@ -84,6 +86,13 @@ final class Match {
     Match(UUID host) {
         this.host = host;
         this.red.add(host); // the host always starts on Red
+        updateBar();
+    }
+
+    /** A quickmatch: nobody hosts it, and players are added to teams when it starts. */
+    Match() {
+        this.host = null;
+        this.quick = true;
         updateBar();
     }
 

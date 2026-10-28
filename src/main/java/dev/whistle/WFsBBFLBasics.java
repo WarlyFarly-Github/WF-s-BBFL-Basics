@@ -30,6 +30,7 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
 
     private NamespacedKey whistleKey;
     private MatchManager matches;
+    private QuickMatchManager quickMatches;
     private final Map<UUID, Long> lastBlown = new HashMap<>();
 
     @Override
@@ -52,10 +53,20 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
             matchCommand.setExecutor(matches);
             matchCommand.setTabCompleter(matches);
         }
+
+        quickMatches = new QuickMatchManager(this, stadiums, matches);
+        matches.setQuickMatches(quickMatches);
+        getServer().getPluginManager().registerEvents(quickMatches, this);
+        PluginCommand voteCommand = getCommand("votematch");
+        if (voteCommand != null) {
+            voteCommand.setExecutor(quickMatches);
+            voteCommand.setTabCompleter(quickMatches);
+        }
     }
 
     @Override
     public void onDisable() {
+        if (quickMatches != null) quickMatches.shutdown();
         if (matches != null) matches.shutdown();
     }
 
