@@ -68,7 +68,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final long INVITE_TIMEOUT_MS = 60_000;
     private static final int COUNTDOWN_SECONDS = 5;   // length of every freeze
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline");
+            List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline", "watch");
 
     private record Invite(UUID host, Team team, long time) {}
 
@@ -134,6 +134,27 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.quick = quick;
     }
 
+    private TeamPrefixes prefixes;
+    private SpectatorManager spectators;
+
+    void setSpectators(SpectatorManager spectators) {
+        this.spectators = spectators;
+    }
+
+    /** Matches that have started and have a stadium, so can be watched. */
+    List<Match> runningMatches() {
+        return new LinkedHashSet<>(matchByPlayer.values()).stream()
+                .filter(m -> m.started && m.stadium != null).toList();
+    }
+
+    boolean isWatching(UUID id) {
+        return spectators != null && spectators.isWatching(id);
+    }
+
+    void setPrefixes(TeamPrefixes prefixes) {
+        this.prefixes = prefixes;
+    }
+
     MatchManager(JavaPlugin plugin, StadiumManager stadiums) {
         this.plugin = plugin;
         this.tabNames = new TabNameTags(plugin);
@@ -144,12 +165,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.jerseyKey = new NamespacedKey(plugin, "jersey");
         this.stadiumKey = new NamespacedKey(plugin, "stadium_choice");
 
-        // Checks for the ball entering a goal area every 2 ticks.
-        Bukkit.getScheduler().runTaskTimer(plugin, this::checkGoals, 2L, 2L);
+        // Checks for the ball entering a goal area or hitting the bounds every tick (a hard kick moves ~1.5 blocks a tick).
+        Bukkit.getScheduler().runTaskTimer(plugin, this::checkGoals, 1L, 1L);
     }
 
     /** Removes every ball on shutdown so none are left behind. */
     void shutdown() {
+        if (spectators != null) spectators.shutdown();
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
             m.onlineMembers().forEach(p -> restoreChestplate(m, p));
@@ -167,7 +189,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline>");
+            error(player, "Usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline|watch>");
             return true;
         }
 
@@ -184,10 +206,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 Match match = hostedMatch(player);
                 if (match != null) endMatch(match, "The match was ended by the host.");
             }
+            case "watch" -> {
+                if (spectators != null) spectators.watch(player, args);
+            }
             case "leave" -> leave(player);
             case "accept" -> accept(player);
             case "decline" -> decline(player);
-            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|start|goal|end|leave|accept|decline>");
+            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|start|goal|end|leave|accept|decline|watch>");
         }
         return true;
     }
@@ -196,6 +221,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
             return SUBCOMMANDS.stream().filter(s -> s.startsWith(args[0].toLowerCase())).toList();
+        }
+        if (args[0].equalsIgnoreCase("watch") && spectators != null) {
+            return spectators.completions(args);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("goal")) {
             return List.of("red", "blue");
@@ -233,6 +261,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         if (matchByPlayer.containsKey(host.getUniqueId())) {
             error(host, "You are already in a match! Use /match leave first.");
+            return;
+        }
+        if (isWatching(host.getUniqueId())) {
+            error(host, "You are watching a match. Use /match leave first.");
             return;
         }
         if (stadiums.names().isEmpty()) {
@@ -325,6 +357,30 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
      * start countdown runs. Returns false if it can't start (fewer than 2 players, or the stadium is taken).
      */
     boolean startQuickMatch(Stadium stadium, int minutes, List<Player> players, Map<UUID, Location> origins) {
+        return launchQuickMatch(stadium, minutes, players, origins, false);
+    }
+
+    /**
+     * Starts a duel: a 5 minute quickmatch between exactly two players on a random finished stadium nobody is
+     * using. Returns null on success, or a message saying why it couldn't start.
+     */
+    String startDuel(Player a, Player b) {
+        List<Stadium> free = new ArrayList<>();
+        for (String name : stadiums.names()) {
+            Stadium stadium = stadiums.get(name);
+            if (stadium != null && stadium.isComplete() && !stadiumInUse(stadium)
+                    && (quick == null || !quick.isReserved(stadium))) {
+                free.add(stadium);
+            }
+        }
+        if (free.isEmpty()) return "No finished stadium is free right now, so the duel can't start.";
+        Stadium stadium = free.get(new java.util.Random().nextInt(free.size()));
+        boolean started = launchQuickMatch(stadium, 5, List.of(a, b), Map.of(), true);
+        return started ? null : "The duel couldn't start.";
+    }
+
+    private boolean launchQuickMatch(Stadium stadium, int minutes, List<Player> players, Map<UUID, Location> origins,
+                                     boolean duel) {
         List<Player> ready = new ArrayList<>(players.stream()
                 .filter(p -> p.isOnline() && !matchByPlayer.containsKey(p.getUniqueId())).toList());
         if (ready.size() < 2 || !stadium.isComplete() || stadiumInUse(stadium)) return false;
@@ -336,6 +392,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         match.ballStart = stadium.center.clone();
 
         Collections.shuffle(ready);
+        if (duel) match.setDuel(ready.get(0).getName(), ready.get(1).getName());
         for (int i = 0; i < ready.size(); i++) {
             Team team = i % 2 == 0 ? Team.RED : Team.BLUE;
             Player p = ready.get(i);
@@ -344,9 +401,17 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             match.startPositions.put(p.getUniqueId(), origins.getOrDefault(p.getUniqueId(), p.getLocation()).clone());
             match.showBar(p);
             giveJersey(match, p);
-            p.sendMessage(Component.text("The quickmatch has started! You are on the ", NamedTextColor.GREEN)
-                    .append(Component.text(team.label, team.color, TextDecoration.BOLD))
-                    .append(Component.text(" team.", NamedTextColor.GREEN)));
+            if (duel) {
+                Player opponent = ready.get(1 - i);
+                p.sendMessage(Component.text("The duel has started on " + stadium.name + "! You are playing against ",
+                                NamedTextColor.GREEN)
+                        .append(Component.text(opponent.getName(), NamedTextColor.WHITE, TextDecoration.BOLD))
+                        .append(Component.text(".", NamedTextColor.GREEN)));
+            } else {
+                p.sendMessage(Component.text("The quickmatch has started! You are on the ", NamedTextColor.GREEN)
+                        .append(Component.text(team.label, team.color, TextDecoration.BOLD))
+                        .append(Component.text(" team.", NamedTextColor.GREEN)));
+            }
         }
         startTimer(match);
         return true;
@@ -403,8 +468,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         match.addGoal(team);
 
         // The title stays up for the whole freeze; the countdown itself runs on the action bar.
+        Component headline = match.duel
+                ? Component.text("Goal!", NamedTextColor.GOLD, TextDecoration.BOLD)
+                : Component.text(team.label + " Goal!", team.color, TextDecoration.BOLD);
         Title title = Title.title(
-                Component.text(team.label + " Goal!", team.color, TextDecoration.BOLD),
+                headline,
                 Component.text("Scored by " + scorer, NamedTextColor.WHITE),
                 Title.Times.times(Duration.ofMillis(250), Duration.ofSeconds(4), Duration.ofMillis(500)));
         for (Player p : match.onlineMembers()) {
@@ -436,10 +504,62 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             if (match.stadium.hasBounds()) {
                 if (match.stadium.boundsContain(ballCenter)) {
                     match.lastInBounds = ball.getLocation().clone();
+                    match.lastVelocity = ball.getVelocity().clone();
                 } else {
-                    returnBallToBounds(match, ball);
+                    bounceOffBounds(match, ball, ballCenter);
                 }
             }
+        }
+    }
+
+    // How the wall bounces the ball: the faster it hits, the bigger the share of its speed it keeps (but always "slight").
+    private static final double BOUNCE_MIN = 0.10;           // share of the impact speed kept by a very slow hit
+    private static final double BOUNCE_PER_SPEED = 0.30;     // extra share kept per block/tick of impact speed
+    private static final double BOUNCE_MAX = 0.55;           // the most that is ever kept
+    private static final double BOUNCE_MIN_SPEED = 0.05;     // a gentle push back in, so the ball never sticks to the wall
+    private static final double WALL_SLIDE_KEEP = 0.90;      // speed kept along the wall (a little friction)
+    private static final double WALL_INSET = 0.3;            // how far inside the edge the ball is put back
+    private static final double BOUNCE_MAX_DISTANCE = 4.0;   // further out than this it was teleported, not bounced
+
+    /** The ball crossed the bounds: put it back at the wall and reflect its velocity, softer than it arrived. */
+    private void bounceOffBounds(Match match, SulfurCube ball, Location ballCenter) {
+        Stadium.BoundsHit hit = match.stadium.nearestBoundsEdge(ballCenter);
+        if (hit == null || hit.distance() > BOUNCE_MAX_DISTANCE) {
+            returnBallToBounds(match, ball); // far outside (teleported or launched): the old "put it back" rule
+            return;
+        }
+
+        Vector v = ball.getVelocity();
+        if (Math.hypot(v.getX(), v.getZ()) < 0.01 && match.lastVelocity != null) v = match.lastVelocity.clone();
+
+        // Split the velocity into the part going into the wall and the part sliding along it.
+        double intoPitch = v.getX() * hit.nx() + v.getZ() * hit.nz();
+        double impact = Math.max(0, -intoPitch); // how fast it hit the wall
+        double slideX = v.getX() - intoPitch * hit.nx();
+        double slideZ = v.getZ() - intoPitch * hit.nz();
+
+        double restitution = Math.min(BOUNCE_MAX, BOUNCE_MIN + BOUNCE_PER_SPEED * impact);
+        double bounce = Math.max(impact * restitution, BOUNCE_MIN_SPEED);
+
+        Vector bounced = new Vector(
+                slideX * WALL_SLIDE_KEEP + hit.nx() * bounce,
+                v.getY(),
+                slideZ * WALL_SLIDE_KEEP + hit.nz() * bounce);
+
+        // Move the ball just inside the wall (keeping its height) so it doesn't hit the wall again next tick.
+        Location target = ball.getLocation().clone();
+        target.add(hit.x() + hit.nx() * WALL_INSET - ballCenter.getX(), 0,
+                hit.z() + hit.nz() * WALL_INSET - ballCenter.getZ());
+        ball.teleport(target);
+        ball.setVelocity(bounced);
+        match.lastInBounds = target.clone();
+        match.lastVelocity = bounced.clone();
+        announceOutOfBounds(match);
+    }
+
+    private void announceOutOfBounds(Match match) {
+        for (Player p : match.onlineMembers()) {
+            p.sendActionBar(Component.text("Out of bounds!", NamedTextColor.YELLOW, TextDecoration.BOLD));
         }
     }
 
@@ -451,9 +571,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         ball.teleport(back.clone());
         ball.setVelocity(new Vector(0, 0, 0));
-        for (Player p : match.onlineMembers()) {
-            p.sendActionBar(Component.text("Out of bounds!", NamedTextColor.YELLOW, TextDecoration.BOLD));
-        }
+        announceOutOfBounds(match);
     }
 
     private void chooseStadium(Player host, String[] args) {
@@ -490,6 +608,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private void leave(Player player) {
         if (quick != null && quick.leaveLobby(player)) return; // waiting in a quickmatch lobby
+        if (spectators != null && spectators.stop(player, true)) return; // watching a match
         Match match = matchByPlayer.get(player.getUniqueId());
         if (match == null) {
             error(player, "You are not in a match.");
@@ -508,7 +627,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     /** A quickmatch can't carry on once a whole team has gone. */
     private void endQuickMatchIfEmpty(Match match) {
         if (match.quick && (match.size(Team.RED) == 0 || match.size(Team.BLUE) == 0)) {
-            endMatch(match, "Not enough players are left, so the quickmatch was ended.");
+            endMatch(match, match.duel ? "Your opponent left, so the duel was ended."
+                    : "Not enough players are left, so the quickmatch was ended.");
         }
     }
 
@@ -525,6 +645,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         if (matchByPlayer.containsKey(player.getUniqueId())) {
             error(player, "You are already in a match!");
+            return;
+        }
+        if (isWatching(player.getUniqueId())) {
+            error(player, "You are watching a match. Use /match leave first, then accept the invite.");
+            invites.put(player.getUniqueId(), invite); // keep the invite so they can still accept it
             return;
         }
         if (match.isFull(invite.team())) {
@@ -970,6 +1095,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             if (direction.lengthSquared() < 1.0E-4) {
                 direction = new Vector(0, 0, 1);
             }
+            if (isWatching(kicker.getUniqueId())) return; // spectators in the stands can't touch the ball
             Match kickerMatch = matchByPlayer.get(kicker.getUniqueId());
             if (kickerMatch != null) kickerMatch.lastKicker = kicker.getUniqueId();
             double power = kicker.isSprinting() ? 1.5 : 1.0;
@@ -1132,7 +1258,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private void updateTimerBar(Match match) {
         int seconds = Math.max(match.secondsLeft, 0);
         String time = String.format("%d:%02d", seconds / 60, seconds % 60);
-        String half = match.quick ? "Quickmatch"
+        String half = match.duel ? "Duel" : match.quick ? "Quickmatch"
                 : match.phase == Match.Phase.FIRST_HALF ? "First Half" : "Second Half";
 
         match.timerBar.color(BossBar.Color.YELLOW);
@@ -1194,11 +1320,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     /** Equips the team jersey, remembering whatever chestplate the player was wearing. */
     private void giveJersey(Match match, Player player) {
-        ItemStack current = player.getInventory().getChestplate();
-        match.savedChestplates.putIfAbsent(player.getUniqueId(),
-                current == null || isJersey(current) ? new ItemStack(Material.AIR) : current);
-        player.getInventory().setChestplate(createJersey(match.teamOf(player.getUniqueId())));
-        applyNameColor(player, match.teamOf(player.getUniqueId()));
+        // Duels have no teams to show: no jersey, and names are left exactly as they are (TAB included).
+        if (!match.duel) {
+            ItemStack current = player.getInventory().getChestplate();
+            match.savedChestplates.putIfAbsent(player.getUniqueId(),
+                    current == null || isJersey(current) ? new ItemStack(Material.AIR) : current);
+            player.getInventory().setChestplate(createJersey(match.teamOf(player.getUniqueId())));
+            applyNameColor(player, match.teamOf(player.getUniqueId()));
+        }
 
         // Everyone plays in adventure mode (no breaking or placing blocks); the old mode comes back afterwards.
         match.savedGameModes.putIfAbsent(player.getUniqueId(), player.getGameMode());
@@ -1206,7 +1335,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void restoreChestplate(Match match, Player player) {
-        clearNameColor(player);
+        if (!match.duel) clearNameColor(player);
         GameMode savedMode = match.savedGameModes.remove(player.getUniqueId());
         if (savedMode != null) player.setGameMode(savedMode);
         ItemStack saved = match.savedChestplates.remove(player.getUniqueId());
@@ -1226,14 +1355,18 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     /** Colours the player's name tag with their team colour: through TAB if it is installed, otherwise a scoreboard team. */
     private void applyNameColor(Player player, Team team) {
-        // With TAB, set a temporary name tag prefix ("&c" red, "&9" blue) instead of using a scoreboard team.
-        if (tabNames.isPresent() && tabNames.setPrefix(player, team == Team.RED ? "&c" : "&9")) return;
+        // With TAB, set a temporary name tag prefix (set by operators with /setprefix, then a space) instead of
+        // using a scoreboard team.
+        boolean red = team == Team.RED;
+        String tag = prefixes != null ? prefixes.tag(red) : (red ? "&c" : "&9");
+        if (tabNames.isPresent() && tabNames.setPrefix(player, tag)) return;
 
         Scoreboard board = mainScoreboard();
         String teamName = team == Team.RED ? RED_SCOREBOARD_TEAM : BLUE_SCOREBOARD_TEAM;
         org.bukkit.scoreboard.Team ours = board.getTeam(teamName);
         if (ours == null) ours = board.registerNewTeam(teamName);
         ours.color(team.color);
+        ours.prefix(prefixes != null ? prefixes.component(red) : Component.empty());
 
         org.bukkit.scoreboard.Team current = board.getEntryTeam(player.getName());
         if (current != null && current.equals(ours)) return;
@@ -1327,13 +1460,17 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (match.ball != null) match.ball.remove();
         Component message = Component.text(reason, NamedTextColor.YELLOW);
 
+        Component redLine = match.duel
+                ? Component.text(match.duelName(Team.RED) + ": ", NamedTextColor.GOLD)
+                : Component.text("Red Team: ", NamedTextColor.RED);
+        Component blueLine = match.duel
+                ? Component.text(match.duelName(Team.BLUE) + ": ", NamedTextColor.GOLD)
+                : Component.text("Blue Team: ", NamedTextColor.BLUE);
         Component overview = Component.text("Overview:", NamedTextColor.GOLD, TextDecoration.BOLD)
                 .appendNewline()
-                .append(Component.text("Red Team: ", NamedTextColor.RED)
-                        .append(Component.text(match.redScore, NamedTextColor.WHITE)))
+                .append(redLine.append(Component.text(match.redScore, NamedTextColor.WHITE)))
                 .appendNewline()
-                .append(Component.text("Blue Team: ", NamedTextColor.BLUE)
-                        .append(Component.text(match.blueScore, NamedTextColor.WHITE)))
+                .append(blueLine.append(Component.text(match.blueScore, NamedTextColor.WHITE)))
                 .appendNewline()
                 .append(resultLine(match));
 
@@ -1347,6 +1484,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             if (matchByPlayer.get(id) == match) matchByPlayer.remove(id);
         }
         invites.values().removeIf(invite -> invite.host().equals(match.host));
+        if (spectators != null) spectators.matchEnded(match);
     }
 
     private Component resultLine(Match match) {
@@ -1355,6 +1493,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return Component.text("The match ended in a draw!", NamedTextColor.YELLOW, TextDecoration.BOLD);
         }
         Team winner = match.redScore > match.blueScore ? Team.RED : Team.BLUE;
+        if (match.duel) {
+            return Component.text(match.duelName(winner), NamedTextColor.WHITE, TextDecoration.BOLD)
+                    .append(Component.text(" has won by " + diff + (diff == 1 ? " goal!" : " goals!"),
+                            NamedTextColor.YELLOW, TextDecoration.BOLD));
+        }
         return Component.text(winner.label, winner.color, TextDecoration.BOLD)
                 .append(Component.text(" has won by " + diff + (diff == 1 ? " goal!" : " goals!"),
                         NamedTextColor.YELLOW, TextDecoration.BOLD));

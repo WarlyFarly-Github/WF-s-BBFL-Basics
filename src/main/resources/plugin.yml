@@ -13,19 +13,26 @@ commands:
     permission: whistle.give
   match:
     description: Create and manage football matches.
-    usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline>
+    usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline|watch>
     permission: wfsbbfl.match
   votematch:
     description: Vote for a quickmatch on a stadium.
     usage: /votematch <stadium> [minutes]
     permission: wfsbbfl.votematch
+  minigames:
+    description: Open the minigames menu (Duels).
+    usage: /minigames
   setlobby:
     description: Set a lobby location (operators only).
     usage: /setlobby quickmatch
     permission: wfsbbfl.setlobby
+  setprefix:
+    description: Set the red or blue team name tag prefix (operators only).
+    usage: /setprefix <red|blue> <prefix|none>
+    permission: wfsbbfl.setprefix
   stadium:
     description: Create stadiums, set centre points and goal areas.
-    usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>
+    usage: /stadium <create|delete|list|info|setcentre|setstands|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>
 permissions:
   whistle.give:
     description: Allows use of /whistle
@@ -44,6 +51,9 @@ permissions:
     default: op
   wfsbbfl.setlobby:
     description: Allows /setlobby
+    default: op
+  wfsbbfl.setprefix:
+    description: Allows /setprefix
     default: op
   wfsbbfl.stadium:
     description: Allows /stadium without the LuckPerms builder role

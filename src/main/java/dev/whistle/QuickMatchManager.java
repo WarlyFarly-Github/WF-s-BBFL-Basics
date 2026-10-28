@@ -190,6 +190,10 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
             error(player, "You are already in a match.");
             return;
         }
+        if (matches.isWatching(id)) {
+            error(player, "You are watching a match. Use /match leave first.");
+            return;
+        }
         Lobby current = lobbyOf(id);
         Lobby wanted = lobbies.get(option);
         if (current != null && current != wanted) {

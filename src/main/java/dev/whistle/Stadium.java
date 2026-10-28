@@ -44,6 +44,7 @@ final class Stadium {
     final List<Location> bounds = new ArrayList<>();
 
     /** Where the ball is placed during the 5 second freezes. */
+    Location stands; // optional: where /match watch from the stands puts spectators
     Location center;
 
     /**
@@ -88,6 +89,10 @@ final class Stadium {
 
     boolean isComplete() {
         return missingParts().isEmpty();
+    }
+
+    boolean hasStands() {
+        return stands != null && stands.getWorld() != null;
     }
 
     boolean hasCenter() {
@@ -173,6 +178,46 @@ final class Stadium {
             }
         }
         return inside;
+    }
+
+    /**
+     * Where a point (outside the bounds) meets the wall: the nearest spot on the bounds edge, the unit direction
+     * pointing from the point back towards it (into the pitch), and how far away the point is. Height is ignored.
+     */
+    record BoundsHit(double x, double z, double nx, double nz, double distance) {}
+
+    /** The nearest bounds edge to the point, or null if there are no bounds or the point is exactly on the edge. */
+    BoundsHit nearestBoundsEdge(Location point) {
+        if (!hasBounds()) return null;
+        int n = bounds.size();
+        double px = point.getX();
+        double pz = point.getZ();
+
+        double bestDistance = Double.MAX_VALUE;
+        double bestX = 0;
+        double bestZ = 0;
+        for (int i = 0; i < n; i++) {
+            int j = (i + 1) % n;
+            double ax = bounds.get(i).getBlockX() + 0.5;
+            double az = bounds.get(i).getBlockZ() + 0.5;
+            double bx = bounds.get(j).getBlockX() + 0.5;
+            double bz = bounds.get(j).getBlockZ() + 0.5;
+            double dx = bx - ax;
+            double dz = bz - az;
+            double lengthSquared = dx * dx + dz * dz;
+            double t = lengthSquared == 0 ? 0 : ((px - ax) * dx + (pz - az) * dz) / lengthSquared;
+            t = Math.max(0, Math.min(1, t));
+            double qx = ax + t * dx;
+            double qz = az + t * dz;
+            double distance = Math.hypot(px - qx, pz - qz);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestX = qx;
+                bestZ = qz;
+            }
+        }
+        if (bestDistance < 1.0E-6) return null;
+        return new BoundsHit(bestX, bestZ, (bestX - px) / bestDistance, (bestZ - pz) / bestDistance, bestDistance);
     }
 
     /** Whether the point is inside the goal area defended by the given team. */

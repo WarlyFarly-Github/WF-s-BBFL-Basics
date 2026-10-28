@@ -44,6 +44,9 @@ final class Match {
 
     final UUID host; // null for quickmatches, which have no host
     boolean quick;   // quickmatch: one period, no half time
+    boolean duel;    // a duel: a 5 minute 1v1 quickmatch with no red and blue teams (players are shown by name)
+    private String redName = "";  // duels: the player on the Red side
+    private String blueName = ""; // duels: the player on the Blue side
     int playSeconds = 5 * 60; // length of each half (league) or of the whole match (quick)
     int redScore;
     int blueScore;
@@ -52,6 +55,7 @@ final class Match {
     SulfurCube ball;
     Stadium stadium; // optional: gives the match a centre point and goal areas
     UUID lastKicker; // last match member to hit the ball
+    org.bukkit.util.Vector lastVelocity; // the ball's velocity when it was last inside the bounds, for bouncing off the wall
     Location lastInBounds; // where the ball last was inside the stadium bounds (null until it has been seen there)
 
     // Match timer
@@ -94,6 +98,19 @@ final class Match {
         this.host = null;
         this.quick = true;
         updateBar();
+    }
+
+    /** Turns this into a duel between the two named players. */
+    void setDuel(String redPlayer, String bluePlayer) {
+        duel = true;
+        redName = redPlayer;
+        blueName = bluePlayer;
+        updateBar();
+    }
+
+    /** The player's name on this side of a duel. */
+    String duelName(Team team) {
+        return team == Team.RED ? redName : blueName;
     }
 
     Set<UUID> teamSet(Team team) {
@@ -159,6 +176,12 @@ final class Match {
     }
 
     private void updateBar() {
+        if (duel) {
+            bar.name(Component.text(redName + " ", NamedTextColor.WHITE, TextDecoration.BOLD)
+                    .append(Component.text(redScore + " - " + blueScore, NamedTextColor.YELLOW, TextDecoration.BOLD))
+                    .append(Component.text(" " + blueName, NamedTextColor.WHITE, TextDecoration.BOLD)));
+            return;
+        }
         bar.name(Component.text("RED ", NamedTextColor.RED, TextDecoration.BOLD)
                 .append(Component.text(redScore + " - " + blueScore, NamedTextColor.WHITE, TextDecoration.BOLD))
                 .append(Component.text(" BLUE", NamedTextColor.BLUE, TextDecoration.BOLD)));
