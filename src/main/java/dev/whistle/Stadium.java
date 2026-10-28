@@ -44,7 +44,7 @@ final class Stadium {
     final List<Location> bounds = new ArrayList<>();
 
     /** Where the ball is placed during the 5 second freezes. */
-    Location stands; // optional: where /match watch from the stands puts spectators
+    Location stands; // where /match watch from the stands puts spectators
     Location center;
 
     /**
@@ -75,6 +75,7 @@ final class Stadium {
     List<String> missingParts() {
         List<String> missing = new ArrayList<>();
         if (!hasCenter()) missing.add("centre point");
+        if (!hasStands()) missing.add("stands point (/stadium setstands)");
         for (Team team : Team.values()) {
             if (!goalComplete(team)) missing.add(team.label + " goal (all 4 corners)");
         }

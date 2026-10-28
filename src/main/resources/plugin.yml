@@ -19,6 +19,10 @@ commands:
     description: Vote for a quickmatch on a stadium.
     usage: /votematch <stadium> [minutes]
     permission: wfsbbfl.votematch
+  smashstadium:
+    description: Create and edit Smash stadiums (operators only).
+    usage: /smashstadium <create|delete|list|info|bounds|wallpoint1|wallpoint2|wallheight>
+    permission: wfsbbfl.smashstadium
   minigames:
     description: Open the minigames menu (Duels).
     usage: /minigames
@@ -48,6 +52,9 @@ permissions:
     default: true
   wfsbbfl.bypass:
     description: Allows /match create bypass (create a match with nobody else online)
+    default: op
+  wfsbbfl.smashstadium:
+    description: Allows /smashstadium
     default: op
   wfsbbfl.setlobby:
     description: Allows /setlobby

@@ -252,10 +252,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
                     set == 0 ? null : set + "/" + Stadium.POSITIONS_PER_TEAM + (set < Stadium.POSITIONS_PER_TEAM ? " (needs all " + Stadium.POSITIONS_PER_TEAM + ")" : " set")));
         }
         player.sendMessage(statusLine("Centre point", stadium.hasCenter() ? describe(stadium.center) : null));
-        player.sendMessage(Component.text(" - Stands point (optional): ", NamedTextColor.GRAY)
-                .append(stadium.hasStands()
-                        ? Component.text(describe(stadium.stands), NamedTextColor.GREEN)
-                        : Component.text("not set", NamedTextColor.GRAY)));
+        player.sendMessage(statusLine("Stands point", stadium.hasStands() ? describe(stadium.stands) : null));
         for (Team team : Team.values()) {
             String value = null;
             if (stadium.goalComplete(team)) {
@@ -277,7 +274,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
                 + describe(stadium.center) + ". The ball is placed here during freezes.", NamedTextColor.GREEN));
     }
 
-    /** /stadium setstands <name>: where spectators who /match watch from the stands are put. Optional. */
+    /** /stadium setstands <name>: where spectators who /match watch from the stands are put. */
     private void setStands(Player player, String[] args) {
         Stadium stadium = requireStadium(player, args, "setstands");
         if (stadium == null || !requireEditable(player, stadium)) return;

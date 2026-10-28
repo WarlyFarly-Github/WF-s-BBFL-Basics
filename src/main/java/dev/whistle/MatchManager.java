@@ -136,6 +136,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private TeamPrefixes prefixes;
     private SpectatorManager spectators;
+    private SmashManager smash;
+
+    void setSmash(SmashManager smash) {
+        this.smash = smash;
+    }
 
     void setSpectators(SpectatorManager spectators) {
         this.spectators = spectators;
@@ -172,6 +177,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     /** Removes every ball on shutdown so none are left behind. */
     void shutdown() {
         if (spectators != null) spectators.shutdown();
+        if (smash != null) smash.shutdown();
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
             m.onlineMembers().forEach(p -> restoreChestplate(m, p));
@@ -263,8 +269,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(host, "You are already in a match! Use /match leave first.");
             return;
         }
-        if (isWatching(host.getUniqueId())) {
-            error(host, "You are watching a match. Use /match leave first.");
+        if (isWatching(host.getUniqueId()) || (smash != null && smash.isPlaying(host.getUniqueId()))) {
+            error(host, "You are watching or playing something. Use /match leave first.");
             return;
         }
         if (stadiums.names().isEmpty()) {
@@ -343,8 +349,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return true;
     }
 
+    /** Playing in a football match or in a Smash game. */
     boolean isInMatch(UUID id) {
-        return matchByPlayer.containsKey(id);
+        return matchByPlayer.containsKey(id) || (smash != null && smash.isPlaying(id));
     }
 
     /** True if a running match is being played on this stadium. */
@@ -609,6 +616,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private void leave(Player player) {
         if (quick != null && quick.leaveLobby(player)) return; // waiting in a quickmatch lobby
         if (spectators != null && spectators.stop(player, true)) return; // watching a match
+        if (smash != null && smash.leave(player)) return; // playing Smash
         Match match = matchByPlayer.get(player.getUniqueId());
         if (match == null) {
             error(player, "You are not in a match.");
@@ -846,6 +854,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES, ItemFlag.HIDE_ADDITIONAL_TOOLTIP);
         meta.lore(List.of(
                 statusLore("Centre point", stadium.hasCenter()),
+                statusLore("Stands point", stadium.hasStands()),
                 statusLore("Red goal", stadium.goalComplete(Team.RED)),
                 statusLore("Blue goal", stadium.goalComplete(Team.BLUE)),
                 statusLore("Bounds", stadium.hasBounds()),
@@ -1029,11 +1038,16 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (match.ball != null) match.ball.remove();
         match.lastInBounds = null; // a fresh ball has not been seen inside the bounds yet
 
-        match.ball = location.getWorld().spawn(location, SulfurCube.class, cube -> {
+        match.ball = createBallEntity(location, Component.text("Football", NamedTextColor.YELLOW, TextDecoration.BOLD));
+    }
+
+    /** A ball (sulfur cube with no AI, marked as ours so kicks and protections apply), also used by Smash. */
+    SulfurCube createBallEntity(Location location, Component name) {
+        return location.getWorld().spawn(location, SulfurCube.class, cube -> {
             cube.setSize(2);
             cube.setAdult();
             cube.setAgeLock(true);
-            cube.customName(Component.text("Football", NamedTextColor.YELLOW, TextDecoration.BOLD));
+            cube.customName(name);
             cube.setCustomNameVisible(true);
             cube.setGlowing(true);
             cube.setAware(false);              // no AI: it only moves when kicked
@@ -1041,6 +1055,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             cube.setRemoveWhenFarAway(false);
             cube.getPersistentDataContainer().set(ballKey, PersistentDataType.BYTE, (byte) 1);
         });
+    }
+
+    /** The velocity a kick by this player gives the ball: where they face, harder when sprinting. */
+    private Vector kickVelocity(Player kicker) {
+        Vector direction = kicker.getLocation().getDirection().setY(0);
+        if (direction.lengthSquared() < 1.0E-4) direction = new Vector(0, 0, 1);
+        double power = kicker.isSprinting() ? 1.5 : 1.0;
+        return direction.normalize().multiply(power).setY(0.35);
     }
 
     private boolean isBall(Entity entity) {
@@ -1087,20 +1109,23 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (!isBall(event.getEntity())) return;
         event.setCancelled(true);
 
+        if (smash != null && smash.ownsBall(event.getEntity())) {
+            // Smash judges every hit itself (turns, warnings, the wall) and applies the kick if it is allowed.
+            if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker
+                    && !isWatching(kicker.getUniqueId())) {
+                smash.onHit(kicker, kickVelocity(kicker));
+            }
+            return;
+        }
+
         Match ballMatch = matchOfBall(event.getEntity());
         if (ballMatch != null && isFrozen(ballMatch)) return; // ball is frozen during the countdown
 
         if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker) {
-            Vector direction = kicker.getLocation().getDirection().setY(0);
-            if (direction.lengthSquared() < 1.0E-4) {
-                direction = new Vector(0, 0, 1);
-            }
             if (isWatching(kicker.getUniqueId())) return; // spectators in the stands can't touch the ball
             Match kickerMatch = matchByPlayer.get(kicker.getUniqueId());
             if (kickerMatch != null) kickerMatch.lastKicker = kicker.getUniqueId();
-            double power = kicker.isSprinting() ? 1.5 : 1.0;
-            Vector velocity = direction.normalize().multiply(power).setY(0.35);
-            event.getEntity().setVelocity(velocity);
+            event.getEntity().setVelocity(kickVelocity(kicker));
         }
     }
 
