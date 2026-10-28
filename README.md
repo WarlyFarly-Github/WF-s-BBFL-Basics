@@ -3,7 +3,7 @@
 A Minecraft plugin by **WarlyFarly** providing basic utilities and a football match system for the BBFL Minecraft server.
 
 **Platform:** Paper 26.3  
-**Internal name:** `WFs_BBRL_Basics`
+**Internal name:** `WFs_BBFL_Basics`
 
 ## Features
 
