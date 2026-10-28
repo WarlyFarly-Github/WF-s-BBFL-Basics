@@ -54,7 +54,14 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
             matchCommand.setTabCompleter(matches);
         }
 
-        quickMatches = new QuickMatchManager(this, stadiums, matches);
+        LobbyManager lobbies = new LobbyManager(this);
+        PluginCommand lobbyCommand = getCommand("setlobby");
+        if (lobbyCommand != null) {
+            lobbyCommand.setExecutor(lobbies);
+            lobbyCommand.setTabCompleter(lobbies);
+        }
+
+        quickMatches = new QuickMatchManager(this, stadiums, matches, lobbies);
         matches.setQuickMatches(quickMatches);
         getServer().getPluginManager().registerEvents(quickMatches, this);
         PluginCommand voteCommand = getCommand("votematch");

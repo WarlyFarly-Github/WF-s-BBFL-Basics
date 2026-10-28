@@ -19,6 +19,10 @@ commands:
     description: Vote for a quickmatch on a stadium.
     usage: /votematch <stadium> [minutes]
     permission: wfsbbfl.votematch
+  setlobby:
+    description: Set a lobby location (operators only).
+    usage: /setlobby quickmatch
+    permission: wfsbbfl.setlobby
   stadium:
     description: Create stadiums, set centre points and goal areas.
     usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>
@@ -37,6 +41,9 @@ permissions:
     default: true
   wfsbbfl.bypass:
     description: Allows /match create bypass (create a match with nobody else online)
+    default: op
+  wfsbbfl.setlobby:
+    description: Allows /setlobby
     default: op
   wfsbbfl.stadium:
     description: Allows /stadium without the LuckPerms builder role

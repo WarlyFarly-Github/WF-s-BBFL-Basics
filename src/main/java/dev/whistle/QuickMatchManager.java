@@ -6,6 +6,7 @@ import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
+import org.bukkit.Location;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -18,6 +19,8 @@ import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -59,18 +62,51 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
     private final JavaPlugin plugin;
     private final StadiumManager stadiums;
     private final MatchManager matches;
+    private final LobbyManager lobbyLocations;
+    private final BukkitTask expiryTask;
+
+    /** Where each player was before being sent to the quickmatch lobby, so they can be sent back. */
+    private final Map<UUID, Location> origins = new HashMap<>();
 
     /** option -> (voter -> time of vote). One vote per player: voting for something else moves the vote. */
     private final Map<Option, Map<UUID, Long>> votes = new LinkedHashMap<>();
     private final Map<Option, Lobby> lobbies = new LinkedHashMap<>();
 
-    QuickMatchManager(JavaPlugin plugin, StadiumManager stadiums, MatchManager matches) {
+    QuickMatchManager(JavaPlugin plugin, StadiumManager stadiums, MatchManager matches, LobbyManager lobbyLocations) {
         this.plugin = plugin;
         this.stadiums = stadiums;
         this.matches = matches;
+        this.lobbyLocations = lobbyLocations;
+        // Votes expire on their own, so check regularly (every 10 seconds) rather than only when someone votes.
+        this.expiryTask = Bukkit.getScheduler().runTaskTimer(plugin, this::purgeExpiredVotes, 200L, 200L);
+    }
+
+    // ------------------------------------------------------------------ lobby teleport
+
+    /** Teleports the player to the quickmatch lobby (if an operator has set one), remembering where they were. */
+    private void sendToLobby(Player player) {
+        Location lobby = lobbyLocations.get(LobbyManager.QUICKMATCH);
+        if (lobby == null) return;
+        origins.putIfAbsent(player.getUniqueId(), player.getLocation().clone());
+        player.teleport(lobby);
+        player.sendMessage(Component.text("You were teleported to the quickmatch lobby. Use /match leave to go back.",
+                NamedTextColor.GRAY));
+    }
+
+    /** Teleports the player back to where they were before the lobby, if they were sent there. */
+    private void sendBack(UUID id) {
+        Location origin = origins.remove(id);
+        Player player = Bukkit.getPlayer(id);
+        if (origin != null && player != null && player.isOnline()) player.teleport(origin);
+    }
+
+    private boolean hasVote(UUID id) {
+        return votes.values().stream().anyMatch(v -> v.containsKey(id));
     }
 
     void shutdown() {
+        expiryTask.cancel();
+        new ArrayList<>(origins.keySet()).forEach(this::sendBack);
         lobbies.values().forEach(l -> {
             if (l.task != null) l.task.cancel();
         });
@@ -180,6 +216,7 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
         removeVotes(id); // a player has one vote at a time
         voters = votes.computeIfAbsent(option, k -> new LinkedHashMap<>());
         voters.put(id, System.currentTimeMillis());
+        sendToLobby(player);
 
         // Clicking this message votes for the same match, which sends it again.
         Component message = Component.text(player.getName() + " has voted for a " + minutes + " minute quickmatch on "
@@ -193,8 +230,17 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
 
     private void purgeExpiredVotes() {
         long now = System.currentTimeMillis();
-        votes.values().forEach(v -> v.values().removeIf(time -> now - time > VOTE_EXPIRY_MS));
+        Set<UUID> expired = new HashSet<>();
+        votes.values().forEach(v -> v.entrySet().removeIf(e -> {
+            if (now - e.getValue() <= VOTE_EXPIRY_MS) return false;
+            expired.add(e.getKey());
+            return true;
+        }));
         votes.values().removeIf(Map::isEmpty);
+        // Anyone whose only vote ran out goes back to where they were.
+        for (UUID id : expired) {
+            if (!hasVote(id) && lobbyOf(id) == null) sendBack(id);
+        }
     }
 
     private void removeVotes(UUID id) {
@@ -212,6 +258,8 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
                 Player p = Bukkit.getPlayer(id);
                 if (p != null && !matches.isInMatch(id) && lobby.players.size() < Match.MAX_PER_TEAM * 2) {
                     lobby.players.add(id);
+                } else {
+                    sendBack(id); // no room (or gone), so don't leave them waiting in the lobby
                 }
             }
         }
@@ -238,6 +286,7 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
         }
         removeVotes(id);
         lobby.players.add(id);
+        sendToLobby(player);
 
         Component joined = Component.text(player.getName() + " joined the quickmatch on " + lobby.stadium.name + " ("
                 + lobby.players.size() + "/" + Match.MAX_PER_TEAM * 2 + ").", NamedTextColor.GREEN);
@@ -272,10 +321,14 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
             Player p = Bukkit.getPlayer(id);
             if (p != null) players.add(p);
         }
-        if (!matches.startQuickMatch(lobby.stadium, lobby.option.minutes(), players)) {
+        if (matches.startQuickMatch(lobby.stadium, lobby.option.minutes(), players, origins)) {
+            // The match moves them to their stadium positions itself, so they no longer need sending back.
+            players.forEach(p -> origins.remove(p.getUniqueId()));
+        } else {
             Component cancelled = Component.text("The quickmatch on " + lobby.stadium.name
                     + " was cancelled: not enough players or the stadium is no longer free.", NamedTextColor.RED);
             players.forEach(p -> p.sendMessage(cancelled));
+            lobby.players.forEach(this::sendBack);
         }
     }
 
@@ -286,13 +339,23 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
         return null;
     }
 
-    /** /match leave while waiting in a lobby. Returns true if the player was in one. */
+    /** /match leave while voting or waiting in a lobby. Returns true if the player was doing either. */
     boolean leaveLobby(Player player) {
-        Lobby lobby = lobbyOf(player.getUniqueId());
-        if (lobby == null) return false;
-        lobby.players.remove(player.getUniqueId());
-        player.sendMessage(Component.text("You left the quickmatch.", NamedTextColor.YELLOW));
-        return true;
+        UUID id = player.getUniqueId();
+        Lobby lobby = lobbyOf(id);
+        if (lobby != null) {
+            lobby.players.remove(id);
+            sendBack(id);
+            player.sendMessage(Component.text("You left the quickmatch.", NamedTextColor.YELLOW));
+            return true;
+        }
+        if (hasVote(id)) {
+            removeVotes(id);
+            sendBack(id);
+            player.sendMessage(Component.text("You withdrew your quickmatch vote.", NamedTextColor.YELLOW));
+            return true;
+        }
+        return false;
     }
 
     @EventHandler
@@ -301,6 +364,7 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
         removeVotes(id);
         Lobby lobby = lobbyOf(id);
         if (lobby != null) lobby.players.remove(id);
+        sendBack(id); // otherwise they'd log back in standing in the lobby
     }
 
     private void error(Player player, String message) {

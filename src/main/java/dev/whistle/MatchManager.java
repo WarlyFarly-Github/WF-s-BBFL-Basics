@@ -324,7 +324,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
      * Starts a quickmatch for these players: teams are shuffled and balanced, then the normal 5 second frozen
      * start countdown runs. Returns false if it can't start (fewer than 2 players, or the stadium is taken).
      */
-    boolean startQuickMatch(Stadium stadium, int minutes, List<Player> players) {
+    boolean startQuickMatch(Stadium stadium, int minutes, List<Player> players, Map<UUID, Location> origins) {
         List<Player> ready = new ArrayList<>(players.stream()
                 .filter(p -> p.isOnline() && !matchByPlayer.containsKey(p.getUniqueId())).toList());
         if (ready.size() < 2 || !stadium.isComplete() || stadiumInUse(stadium)) return false;
@@ -341,7 +341,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             Player p = ready.get(i);
             match.add(p.getUniqueId(), team);
             matchByPlayer.put(p.getUniqueId(), match);
-            match.startPositions.put(p.getUniqueId(), p.getLocation().clone());
+            match.startPositions.put(p.getUniqueId(), origins.getOrDefault(p.getUniqueId(), p.getLocation()).clone());
             match.showBar(p);
             giveJersey(match, p);
             p.sendMessage(Component.text("The quickmatch has started! You are on the ", NamedTextColor.GREEN)
