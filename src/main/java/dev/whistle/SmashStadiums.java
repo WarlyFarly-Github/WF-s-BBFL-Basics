@@ -28,7 +28,7 @@ import java.util.UUID;
 final class SmashStadiums implements CommandExecutor, TabCompleter {
 
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "delete", "list", "info", "bounds", "wallpoint1", "wallpoint2", "wallheight");
+            List.of("create", "delete", "list", "info", "edit", "confirm", "bounds", "wallpoint1", "wallpoint2", "wallheight", "wallfront");
     private static final List<String> BOUNDS_ACTIONS = List.of("addpoint", "removepoint", "clear");
     private static final double VIEW_DISTANCE = 48;
 
@@ -65,7 +65,7 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
             return true;
         }
         if (args.length == 0 || !SUBCOMMANDS.contains(args[0].toLowerCase())) {
-            error(player, "Usage: /smashstadium <create|delete|list|info|bounds|wallpoint1|wallpoint2|wallheight> ...");
+            error(player, "Usage: /smashstadium <create|delete|list|info|edit|confirm|bounds|wallpoint1|wallpoint2|wallheight|wallfront> ...");
             return true;
         }
         switch (args[0].toLowerCase()) {
@@ -73,9 +73,12 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
             case "delete" -> delete(player, args);
             case "list" -> list(player);
             case "info" -> info(player, args);
+            case "edit" -> edit(player, args);
+            case "confirm" -> confirm(player, args);
             case "bounds" -> bounds(player, args);
             case "wallpoint1", "wallpoint2" -> wallPoint(player, args);
             case "wallheight" -> wallHeight(player, args);
+            case "wallfront" -> wallFront(player, args);
             default -> { }
         }
         return true;
@@ -96,10 +99,11 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
         }
         SmashStadium stadium = new SmashStadium(args[1]);
         stadiums.put(args[1].toLowerCase(), stadium);
-        lastEdited.put(player.getUniqueId(), args[1].toLowerCase());
+        startEditing(player, stadium);
         save();
         player.sendMessage(Component.text("Created smash stadium " + stadium.name + ". It needs bounds (/smashstadium bounds "
-                + stadium.name + " addpoint), wallpoint1, wallpoint2 and wallheight.", NamedTextColor.GREEN));
+                + stadium.name + " addpoint), wallpoint1, wallpoint2 and wallheight. Use /smashstadium confirm "
+                + stadium.name + " when you are done.", NamedTextColor.GREEN));
     }
 
     private void delete(Player player, String[] args) {
@@ -127,13 +131,14 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
     private void info(Player player, String[] args) {
         SmashStadium stadium = named(player, args, "info");
         if (stadium == null) return;
-        lastEdited.put(player.getUniqueId(), stadium.name.toLowerCase());
         player.sendMessage(Component.text("Smash stadium " + stadium.name, NamedTextColor.GOLD));
         line(player, "Bounds", stadium.hasBounds() ? stadium.bounds.size() + " points" : null);
         line(player, "Wall point 1", stadium.wall1 == null ? null : describe(stadium.wall1));
         line(player, "Wall point 2", stadium.wall2 == null ? null : describe(stadium.wall2));
         line(player, "Wall height", stadium.wallHeight > 0 ? stadium.wallHeight + " blocks" : null);
+        if (stadium.hasWallPoints()) line(player, "Wall front faces", stadium.frontCompass());
         List<String> missing = stadium.missingParts();
+        line(player, "Status", stadium.confirmed ? "confirmed (locked)" : "editing (particles shown)");
         line(player, "Ready to play", missing.isEmpty() ? "yes" : null);
         if (!missing.isEmpty()) {
             player.sendMessage(Component.text("Still needed: " + String.join(", ", missing), NamedTextColor.RED));
@@ -147,8 +152,7 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
             return;
         }
         SmashStadium stadium = named(player, args, "bounds");
-        if (stadium == null) return;
-        lastEdited.put(player.getUniqueId(), stadium.name.toLowerCase());
+        if (stadium == null || !requireEditable(player, stadium)) return;
 
         Location here = player.getLocation().getBlock().getLocation();
         List<Location> points = stadium.bounds;
@@ -200,8 +204,7 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
     private void wallPoint(Player player, String[] args) {
         boolean first = args[0].equalsIgnoreCase("wallpoint1");
         SmashStadium stadium = named(player, args, args[0].toLowerCase());
-        if (stadium == null) return;
-        lastEdited.put(player.getUniqueId(), stadium.name.toLowerCase());
+        if (stadium == null || !requireEditable(player, stadium)) return;
 
         Location here = player.getLocation().getBlock().getLocation();
         if (first) stadium.wall1 = here;
@@ -217,7 +220,7 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
             return;
         }
         SmashStadium stadium = named(player, args, "wallheight");
-        if (stadium == null) return;
+        if (stadium == null || !requireEditable(player, stadium)) return;
         double height;
         try {
             height = Double.parseDouble(args[2]);
@@ -228,11 +231,124 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
             error(player, "The height must be a number of blocks between 0 and 64.");
             return;
         }
-        lastEdited.put(player.getUniqueId(), stadium.name.toLowerCase());
         stadium.wallHeight = height;
         save();
         player.sendMessage(Component.text("The wall of " + stadium.name + " is now " + height + " blocks high.",
                 NamedTextColor.GREEN));
+    }
+
+    /** Refuses (and explains) if the arena is confirmed; otherwise remembers it as the one being worked on. */
+    private boolean requireEditable(Player player, SmashStadium stadium) {
+        if (stadium.confirmed) {
+            error(player, stadium.name + " is confirmed and locked. Use /smashstadium edit " + stadium.name
+                    + " to change it.");
+            return false;
+        }
+        startEditing(player, stadium);
+        return true;
+    }
+
+    /** Makes this the arena the player is editing; the one they were editing before is locked. */
+    private void startEditing(Player player, SmashStadium stadium) {
+        String previousName = lastEdited.put(player.getUniqueId(), stadium.name.toLowerCase());
+        if (previousName != null && !previousName.equalsIgnoreCase(stadium.name)) {
+            SmashStadium previous = stadiums.get(previousName);
+            if (previous != null && !previous.confirmed) {
+                previous.confirmed = true;
+                save();
+            }
+        }
+    }
+
+    /** /smashstadium confirm [name]: locks the arena and hides its particles. It must be finished. */
+    private void confirm(Player player, String[] args) {
+        SmashStadium stadium = namedOrLast(player, args, "confirm");
+        if (stadium == null) return;
+        if (stadium.confirmed) {
+            error(player, stadium.name + " is already confirmed.");
+            return;
+        }
+        List<String> missing = stadium.missingParts();
+        if (!missing.isEmpty()) {
+            error(player, stadium.name + " isn't finished yet. Still missing: " + String.join(", ", missing) + ".");
+            return;
+        }
+        stadium.confirmed = true;
+        save();
+        player.sendMessage(Component.text("Confirmed " + stadium.name + ". The particles are gone and it is locked. "
+                + "Use /smashstadium edit " + stadium.name + " to change it again.", NamedTextColor.GREEN));
+    }
+
+    /** /smashstadium edit [name]: unlocks the arena and brings the particles back. */
+    private void edit(Player player, String[] args) {
+        SmashStadium stadium = namedOrLast(player, args, "edit");
+        if (stadium == null) return;
+        if (!stadium.confirmed && stadium.name.equalsIgnoreCase(lastEdited.get(player.getUniqueId()))) {
+            error(player, "You are already editing " + stadium.name + ".");
+            return;
+        }
+        startEditing(player, stadium); // locks whatever this player was editing before
+        stadium.confirmed = false;
+        save();
+        player.sendMessage(Component.text("Editing " + stadium.name + ". The particles are back; use /smashstadium confirm "
+                + "when you are done.", NamedTextColor.GREEN));
+    }
+
+    private static final Map<String, double[]> DIRECTIONS = Map.of(
+            "north", new double[] {0, -1}, "south", new double[] {0, 1},
+            "east", new double[] {1, 0}, "west", new double[] {-1, 0},
+            "northeast", new double[] {1, -1}, "northwest", new double[] {-1, -1},
+            "southeast", new double[] {1, 1}, "southwest", new double[] {-1, 1});
+
+    /** /smashstadium wallfront <stadium> <direction|here>: which side of the wall the trigger is on. */
+    private void wallFront(Player player, String[] args) {
+        String usage = "Usage: /smashstadium wallfront <stadium> <north|northeast|east|southeast|south|southwest|west|northwest|here>";
+        if (args.length != 3) {
+            error(player, usage);
+            return;
+        }
+        SmashStadium stadium = named(player, args, "wallfront");
+        if (stadium == null || !requireEditable(player, stadium)) return;
+        if (!stadium.hasWallPoints()) {
+            error(player, "Set wallpoint1 and wallpoint2 first.");
+            return;
+        }
+
+        String choice = args[2].toLowerCase().replace("-", "");
+        boolean ok;
+        if (choice.equals("here")) {
+            // The side of the wall you are standing on.
+            double side = stadium.signedWallDistance(player.getLocation());
+            ok = Math.abs(side) > 1.0E-6;
+            if (ok) stadium.frontSide = side > 0 ? 1 : -1;
+        } else if (DIRECTIONS.containsKey(choice)) {
+            double[] d = DIRECTIONS.get(choice);
+            ok = stadium.setFrontToward(d[0], d[1]);
+        } else {
+            error(player, usage);
+            return;
+        }
+        if (!ok) {
+            error(player, "That direction runs along the wall, so it has no front. Try another direction or stand to one side and use here.");
+            return;
+        }
+        save();
+        player.sendMessage(Component.text("The front of the wall of " + stadium.name + " now faces " + stadium.frontCompass()
+                + ". The ball bounces off a trigger line just in front of the wall's blocks (shown in aqua while editing).",
+                NamedTextColor.GREEN));
+    }
+
+    /** The named arena, or the one this player last worked on if no name is given. */
+    private SmashStadium namedOrLast(Player player, String[] args, String sub) {
+        if (args.length >= 2) {
+            SmashStadium stadium = get(args[1]);
+            if (stadium == null) error(player, "No smash stadium called " + args[1] + ".");
+            return stadium;
+        }
+        String last = lastEdited.get(player.getUniqueId());
+        SmashStadium stadium = last == null ? null : stadiums.get(last);
+        if (stadium == null) error(player, "Name a stadium: /smashstadium " + sub + " <stadium>");
+        return stadium;
     }
 
     private SmashStadium named(Player player, String[] args, String sub) {
@@ -278,7 +394,7 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
             String name = lastEdited.get(viewer.getUniqueId());
             if (name == null || !viewer.hasPermission("wfsbbfl.smashstadium")) continue;
             SmashStadium stadium = stadiums.get(name);
-            if (stadium == null) continue;
+            if (stadium == null || stadium.confirmed) continue;
 
             Particle.DustOptions white = new Particle.DustOptions(Color.WHITE, 1.2f);
             int n = stadium.bounds.size();
@@ -310,6 +426,17 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
                 double z2 = stadium.wall2.getBlockZ() + 0.5;
                 line(viewer, pink, x1, base, z1, x2, base, z2);
                 line(viewer, pink, x1, base + stadium.wallHeight, z1, x2, base + stadium.wallHeight, z2);
+
+                // The trigger line in front of the wall, where the ball bounces.
+                double[] front = stadium.frontNormal();
+                double trigger = SmashStadium.triggerDistance(SmashStadium.DEFAULT_BALL_HALF_WIDTH);
+                double ox = front[0] * trigger;
+                double oz = front[1] * trigger;
+                Particle.DustOptions aqua = new Particle.DustOptions(Color.AQUA, 1.2f);
+                line(viewer, aqua, x1 + ox, base, z1 + oz, x2 + ox, base, z2 + oz);
+                line(viewer, aqua, x1 + ox, base + stadium.wallHeight, z1 + oz, x2 + ox, base + stadium.wallHeight, z2 + oz);
+                line(viewer, aqua, x1 + ox, base, z1 + oz, x1 + ox, base + stadium.wallHeight, z1 + oz);
+                line(viewer, aqua, x2 + ox, base, z2 + oz, x2 + ox, base + stadium.wallHeight, z2 + oz);
             }
         }
     }
@@ -343,6 +470,8 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
             if (stadium.wall1 != null) yaml.set(path + ".wall1", stadium.wall1);
             if (stadium.wall2 != null) yaml.set(path + ".wall2", stadium.wall2);
             yaml.set(path + ".wallHeight", stadium.wallHeight);
+            yaml.set(path + ".confirmed", stadium.confirmed);
+            yaml.set(path + ".frontSide", stadium.frontSide);
         }
         try {
             plugin.getDataFolder().mkdirs();
@@ -373,6 +502,8 @@ final class SmashStadiums implements CommandExecutor, TabCompleter {
             stadium.wall1 = yaml.getLocation(path + ".wall1");
             stadium.wall2 = yaml.getLocation(path + ".wall2");
             stadium.wallHeight = yaml.getDouble(path + ".wallHeight", 0);
+            stadium.confirmed = yaml.getBoolean(path + ".confirmed", true);
+            stadium.frontSide = yaml.getInt(path + ".frontSide", 1) < 0 ? -1 : 1;
             stadiums.put(name.toLowerCase(), stadium);
         }
     }

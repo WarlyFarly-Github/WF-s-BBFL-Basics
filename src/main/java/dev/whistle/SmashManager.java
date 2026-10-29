@@ -45,6 +45,15 @@ final class SmashManager implements Listener {
     private static final int IDLE_RESET_TICKS = 400;    // a ball nobody touches for 20 seconds goes back to the middle
     private static final int MAX_WARNINGS = 2;
 
+
+    // Hits and the wall are livelier in Smash than in football.
+    private static final double HIT_LIFT = 0.65;               // a hit sends the ball up this much (football is 0.35)
+    private static final double WALL_RECOIL_MIN = 0.45;        // share of the impact speed kept off the wall, even slow
+    private static final double WALL_RECOIL_PER_SPEED = 0.35;  // extra share kept per block/tick of impact speed
+    private static final double WALL_RECOIL_MAX = 0.95;        // the most that is ever kept
+    private static final double WALL_RECOIL_MIN_SPEED = 0.30;  // the wall always pushes the ball back out at least this fast
+    private static final double WALL_SLIDE_KEEP = 0.95;        // speed kept along the wall
+
     private enum Phase { COUNTDOWN, PLAY }
 
     private static final class Game {
@@ -58,6 +67,7 @@ final class SmashManager implements Listener {
         private final BossBar bar = BossBar.bossBar(Component.empty(), 1.0f, BossBar.Color.PURPLE, BossBar.Overlay.PROGRESS);
         private final Location spawn;
         private SulfurCube ball;
+        private Location lastCentre; // where the ball was last tick, so a fast ball can't skip over the trigger
         private UUID lastHitter;   // who hit the ball last (they can't hit it again straight away)
         private UUID pending;      // who hit it and hasn't had it reach the wall yet
         private long tick;       // never reset, so hit cooldowns keep working across countdowns
@@ -77,11 +87,13 @@ final class SmashManager implements Listener {
     private final JavaPlugin plugin;
     private final MatchManager matches;
     private final SmashStadiums stadiums;
+    private final Celebration celebration;
     private final Map<UUID, Game> byPlayer = new HashMap<>();
     private final List<Game> games = new ArrayList<>();
 
-    SmashManager(JavaPlugin plugin, MatchManager matches, SmashStadiums stadiums) {
+    SmashManager(JavaPlugin plugin, MatchManager matches, SmashStadiums stadiums, Celebration celebration) {
         this.plugin = plugin;
+        this.celebration = celebration;
         this.matches = matches;
         this.stadiums = stadiums;
     }
@@ -139,7 +151,7 @@ final class SmashManager implements Listener {
         }
 
         game.ball = matches.createBallEntity(game.spawn.clone().add(0, 1, 0),
-                Component.text("Smash Ball", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD));
+                Component.text("Smash Ball", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD), false);
         updateBar(game);
         beginCountdown(game, FIRST_COUNTDOWN_SECONDS);
         game.task = Bukkit.getScheduler().runTaskTimer(plugin, () -> tick(game), 1L, 1L);
@@ -152,6 +164,7 @@ final class SmashManager implements Listener {
         game.phase = Phase.COUNTDOWN;
         game.countdownLeft = seconds;
         game.phaseTicks = 0;
+        game.lastCentre = null;
         resetBall(game);
         announceCountdown(game);
     }
@@ -181,7 +194,7 @@ final class SmashManager implements Listener {
         game.tick++;
         if (game.ball == null || !game.ball.isValid()) {
             game.ball = matches.createBallEntity(game.spawn.clone().add(0, 1, 0),
-                    Component.text("Smash Ball", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD));
+                    Component.text("Smash Ball", NamedTextColor.LIGHT_PURPLE, TextDecoration.BOLD), false);
             if (game.phase == Phase.COUNTDOWN) game.ball.setGravity(false);
         }
 
@@ -203,8 +216,16 @@ final class SmashManager implements Listener {
             return;
         }
 
+        // Before the serve (and after a reset) the ball only moves when punched: undo any nudge.
+        if (game.lastHitter == null && game.pending == null) {
+            Vector still = game.ball.getVelocity();
+            if (still.getX() != 0 || still.getZ() != 0) game.ball.setVelocity(new Vector(0, still.getY(), 0));
+        }
+
+        boolean hitWall = bounceOffWall(game, centre);
+
         if (game.pending != null) {
-            if (game.stadium.touchesWall(centre)) {
+            if (hitWall) {
                 game.pending = null; // that hit reached the wall, so it counts
                 game.lastActivity = game.tick;
                 for (Player p : players(game)) p.sendActionBar(Component.text("Wall hit!", NamedTextColor.GREEN, TextDecoration.BOLD));
@@ -218,6 +239,73 @@ final class SmashManager implements Listener {
             broadcast(game, Component.text("Nobody hit the ball, so it goes back to the middle.", NamedTextColor.YELLOW));
             resetAndServe(game);
         }
+    }
+
+    /**
+     * The wall trigger: when the ball reaches the line just in front of the wall it recoils strongly off it, and the
+     * hit counts as reaching the wall. Returns true if it did.
+     */
+    private boolean bounceOffWall(Game game, Location centre) {
+        SmashStadium stadium = game.stadium;
+        Location previous = game.lastCentre;
+        game.lastCentre = centre.clone();
+
+        // The trigger sits just in front of the blocks: the ball's real half width plus the block face.
+        double ballHalfWidth = Math.max(game.ball.getBoundingBox().getWidthX(), game.ball.getBoundingBox().getWidthZ()) / 2.0;
+        double trigger = SmashStadium.triggerDistance(ballHalfWidth);
+        double front = stadium.frontDistance(centre);
+
+        // Normally the ball is in the trigger zone. A hard punch can move it right across the zone in one tick,
+        // so also check whether it crossed the trigger line since the last tick.
+        boolean inZone = stadium.inTriggerZone(centre, trigger);
+        Location crossing = null;
+        if (!inZone && previous != null && previous.getWorld().equals(centre.getWorld())) {
+            double before = stadium.frontDistance(previous);
+            if (before > trigger && front <= trigger) {
+                double t = (before - trigger) / (before - front);
+                Location point = previous.clone().add(centre.clone().subtract(previous).toVector().multiply(t));
+                if (stadium.alongWall(point)) crossing = point;
+            }
+        }
+        if (!inZone && crossing == null) return false;
+
+        double[] normal = stadium.frontNormal(); // pointing away from the wall, into the arena
+        double nx = normal[0];
+        double nz = normal[1];
+
+        // The ball's velocity, or how far it actually moved this tick if the server reports it as (nearly) still.
+        Vector v = game.ball.getVelocity();
+        if (Math.hypot(v.getX(), v.getZ()) < 0.01 && previous != null && previous.getWorld().equals(centre.getWorld())) {
+            v = centre.clone().subtract(previous).toVector();
+        }
+        double intoPitch = v.getX() * nx + v.getZ() * nz;
+        if (intoPitch >= 0 && front >= 0 && crossing == null) return false; // moving away: not a new hit
+
+        // A strong recoil: the ball keeps most of a hard hit and is always pushed clearly back out.
+        double impact = Math.max(0, -intoPitch);
+        double restitution = Math.min(WALL_RECOIL_MAX, WALL_RECOIL_MIN + WALL_RECOIL_PER_SPEED * impact);
+        double bounce = Math.max(impact * restitution, WALL_RECOIL_MIN_SPEED);
+        double slideX = v.getX() - intoPitch * nx;
+        double slideZ = v.getZ() - intoPitch * nz;
+        Vector bounced = new Vector(
+                slideX * WALL_SLIDE_KEEP + nx * bounce,
+                v.getY(),
+                slideZ * WALL_SLIDE_KEEP + nz * bounce);
+
+        // Put it back just in front of the trigger so it doesn't trigger again straight away: at the point where it
+        // crossed the line if it skipped over, otherwise pushed out from where it is.
+        Location target = game.ball.getLocation();
+        if (crossing != null) {
+            target.add(crossing.getX() - centre.getX() + nx * MatchManager.WALL_INSET, crossing.getY() - centre.getY(),
+                    crossing.getZ() - centre.getZ() + nz * MatchManager.WALL_INSET);
+        } else {
+            double push = trigger + MatchManager.WALL_INSET - front;
+            target.add(nx * push, 0, nz * push);
+        }
+        game.ball.teleport(target);
+        game.ball.setVelocity(bounced);
+        game.lastCentre = null; // it moved, so don't compare the next tick with the old spot
+        return true;
     }
 
     private void outOfBounds(Game game) {
@@ -270,6 +358,7 @@ final class SmashManager implements Listener {
             }
         }
 
+        velocity.setY(HIT_LIFT); // Smash hits send the ball higher than a football kick
         game.ball.setVelocity(velocity);
         game.pending = id;
         game.pendingSince = game.tick;
@@ -330,18 +419,20 @@ final class SmashManager implements Listener {
         Component message = winner != null
                 ? Component.text(winner.getName() + " wins Smash!", NamedTextColor.GOLD, TextDecoration.BOLD)
                 : Component.text("Smash ended with no winner.", NamedTextColor.YELLOW);
+        List<Player> everyone = new ArrayList<>();
         for (UUID id : game.everyone) {
             Player p = Bukkit.getPlayer(id);
             if (p == null) continue;
+            everyone.add(p);
             p.sendMessage(message);
-            if (game.alive.contains(id)) {
-                p.showTitle(Title.title(message, Component.empty()));
-                release(game, p);
-            }
+            if (game.alive.contains(id)) release(game, p);
         }
         for (UUID id : game.alive) byPlayer.remove(id);
         game.alive.clear();
         games.remove(game);
+
+        // "You won!", fireworks around the winner (once they are back where they were), and the level up sound.
+        celebration.finish(everyone, winner);
     }
 
     /** Puts a player back: their old game mode and the place they were before. */

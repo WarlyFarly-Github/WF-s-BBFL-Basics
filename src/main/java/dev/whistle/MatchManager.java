@@ -137,6 +137,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private TeamPrefixes prefixes;
     private SpectatorManager spectators;
     private SmashManager smash;
+    private Celebration celebration;
+
+    void setCelebration(Celebration celebration) {
+        this.celebration = celebration;
+    }
 
     void setSmash(SmashManager smash) {
         this.smash = smash;
@@ -520,12 +525,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     // How the wall bounces the ball: the faster it hits, the bigger the share of its speed it keeps (but always "slight").
-    private static final double BOUNCE_MIN = 0.10;           // share of the impact speed kept by a very slow hit
-    private static final double BOUNCE_PER_SPEED = 0.30;     // extra share kept per block/tick of impact speed
-    private static final double BOUNCE_MAX = 0.55;           // the most that is ever kept
-    private static final double BOUNCE_MIN_SPEED = 0.05;     // a gentle push back in, so the ball never sticks to the wall
-    private static final double WALL_SLIDE_KEEP = 0.90;      // speed kept along the wall (a little friction)
-    private static final double WALL_INSET = 0.3;            // how far inside the edge the ball is put back
+    static final double BOUNCE_MIN = 0.10;           // share of the impact speed kept by a very slow hit
+    static final double BOUNCE_PER_SPEED = 0.30;     // extra share kept per block/tick of impact speed
+    static final double BOUNCE_MAX = 0.55;           // the most that is ever kept
+    static final double BOUNCE_MIN_SPEED = 0.05;     // a gentle push back in, so the ball never sticks to the wall
+    static final double WALL_SLIDE_KEEP = 0.90;      // speed kept along the wall (a little friction)
+    static final double WALL_INSET = 0.3;            // how far inside the edge the ball is put back
     private static final double BOUNCE_MAX_DISTANCE = 4.0;   // further out than this it was teleported, not bounced
 
     /** The ball crossed the bounds: put it back at the wall and reflect its velocity, softer than it arrived. */
@@ -1043,7 +1048,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     /** A ball (sulfur cube with no AI, marked as ours so kicks and protections apply), also used by Smash. */
     SulfurCube createBallEntity(Location location, Component name) {
+        return createBallEntity(location, name, true);
+    }
+
+    /** As above; with pushable false, walking or bumping into the ball does nothing (only hits move it). */
+    SulfurCube createBallEntity(Location location, Component name, boolean pushable) {
         return location.getWorld().spawn(location, SulfurCube.class, cube -> {
+            cube.setCollidable(pushable);
             cube.setSize(2);
             cube.setAdult();
             cube.setAgeLock(true);
@@ -1111,7 +1122,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         if (smash != null && smash.ownsBall(event.getEntity())) {
             // Smash judges every hit itself (turns, warnings, the wall) and applies the kick if it is allowed.
+            // Only a punch (a direct melee attack) counts as a hit, nothing else.
             if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker
+                    && byEntity.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK
                     && !isWatching(kicker.getUniqueId())) {
                 smash.onHit(kicker, kickVelocity(kicker));
             }
@@ -1499,11 +1512,23 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 .appendNewline()
                 .append(resultLine(match));
 
-        for (Player p : match.onlineMembers()) {
+        List<Player> members = new ArrayList<>(match.onlineMembers());
+        for (Player p : members) {
             restoreChestplate(match, p);
             match.hideBar(p);
             p.sendMessage(message);
             p.sendMessage(overview);
+        }
+        if (match.duel && celebration != null) {
+            // Duels are a minigame: the winner (if the score isn't level) gets the celebration, everyone the sound.
+            Player winner = null;
+            if (match.redScore != match.blueScore) {
+                Team winning = match.redScore > match.blueScore ? Team.RED : Team.BLUE;
+                for (Player p : members) {
+                    if (match.teamOf(p.getUniqueId()) == winning) winner = p;
+                }
+            }
+            celebration.finish(members, winner);
         }
         for (UUID id : new ArrayList<>(matchByPlayer.keySet())) {
             if (matchByPlayer.get(id) == match) matchByPlayer.remove(id);

@@ -21,7 +21,7 @@ commands:
     permission: wfsbbfl.votematch
   smashstadium:
     description: Create and edit Smash stadiums (operators only).
-    usage: /smashstadium <create|delete|list|info|bounds|wallpoint1|wallpoint2|wallheight>
+    usage: /smashstadium <create|delete|list|info|edit|confirm|bounds|wallpoint1|wallpoint2|wallheight|wallfront>
     permission: wfsbbfl.smashstadium
   minigames:
     description: Open the minigames menu (Duels).
