@@ -137,6 +137,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private TeamPrefixes prefixes;
     private SpectatorManager spectators;
     private SmashManager smash;
+    private OneBounceManager oneBounce;
+
+    void setOneBounce(OneBounceManager oneBounce) {
+        this.oneBounce = oneBounce;
+    }
     private Celebration celebration;
 
     void setCelebration(Celebration celebration) {
@@ -183,6 +188,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     void shutdown() {
         if (spectators != null) spectators.shutdown();
         if (smash != null) smash.shutdown();
+        if (oneBounce != null) oneBounce.shutdown();
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
             m.onlineMembers().forEach(p -> restoreChestplate(m, p));
@@ -274,7 +280,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(host, "You are already in a match! Use /match leave first.");
             return;
         }
-        if (isWatching(host.getUniqueId()) || (smash != null && smash.isPlaying(host.getUniqueId()))) {
+        if (isWatching(host.getUniqueId()) || (smash != null && smash.isPlaying(host.getUniqueId()))
+                || (oneBounce != null && oneBounce.isPlaying(host.getUniqueId()))) {
             error(host, "You are watching or playing something. Use /match leave first.");
             return;
         }
@@ -356,7 +363,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     /** Playing in a football match or in a Smash game. */
     boolean isInMatch(UUID id) {
-        return matchByPlayer.containsKey(id) || (smash != null && smash.isPlaying(id));
+        return matchByPlayer.containsKey(id) || (smash != null && smash.isPlaying(id))
+                || (oneBounce != null && oneBounce.isPlaying(id));
     }
 
     /** True if a running match is being played on this stadium. */
@@ -622,6 +630,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (quick != null && quick.leaveLobby(player)) return; // waiting in a quickmatch lobby
         if (spectators != null && spectators.stop(player, true)) return; // watching a match
         if (smash != null && smash.leave(player)) return; // playing Smash
+        if (oneBounce != null && oneBounce.leave(player)) return; // playing One-Bounce
         Match match = matchByPlayer.get(player.getUniqueId());
         if (match == null) {
             error(player, "You are not in a match.");
@@ -1127,6 +1136,16 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     && byEntity.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK
                     && !isWatching(kicker.getUniqueId())) {
                 smash.onHit(kicker, kickVelocity(kicker));
+            }
+            return;
+        }
+
+        if (oneBounce != null && oneBounce.ownsBall(event.getEntity())) {
+            // One-Bounce decides who may hit the ball and when; only a punch counts.
+            if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker
+                    && byEntity.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK
+                    && !isWatching(kicker.getUniqueId())) {
+                oneBounce.onHit(kicker, kickVelocity(kicker));
             }
             return;
         }

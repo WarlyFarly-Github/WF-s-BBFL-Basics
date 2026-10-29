@@ -46,7 +46,8 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
 
     enum Minigame {
         DUELS("Duels", "1v1, 5 minutes"),
-        SMASH("Smash", "hit the ball against the wall, 2-" + SmashManager.MAX_PLAYERS + " players");
+        SMASH("Smash", "hit the ball against the wall, 2-" + SmashManager.MAX_PLAYERS + " players"),
+        ONEBOUNCE("One-Bounce", "punch the ball to others, one bounce only, 2-" + OneBounceManager.MAX_PLAYERS + " players");
 
         final String label;
         final String description;
@@ -86,6 +87,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
     private static final int SLOT_SELECT = 11;
     private static final int SLOT_INVITE = 15;
     private static final int SLOT_DUELS = 11;
+    private static final int SLOT_ONEBOUNCE = 13;
     private static final int SLOT_SMASH = 15;
     private static final int SLOT_PREVIOUS = 21;
     private static final int SLOT_PAGE = 22;
@@ -97,16 +99,19 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
     private final JavaPlugin plugin;
     private final MatchManager matches;
     private final SmashManager smash;
+    private final OneBounceManager oneBounce;
     private final NamespacedKey targetKey;
     private final Map<UUID, Minigame> selected = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
-    /** Smash lobbies: the host, and everyone who has accepted their invite so far. */
+    /** Lobbies for the games with more than two players: the host, and everyone who has accepted their invite so far. */
     private final Map<UUID, Set<UUID>> smashLobbies = new HashMap<>();
+    private final Map<UUID, Minigame> lobbyGames = new HashMap<>();
 
-    MinigameManager(JavaPlugin plugin, MatchManager matches, SmashManager smash) {
+    MinigameManager(JavaPlugin plugin, MatchManager matches, SmashManager smash, OneBounceManager oneBounce) {
         this.plugin = plugin;
         this.matches = matches;
         this.smash = smash;
+        this.oneBounce = oneBounce;
         this.targetKey = new NamespacedKey(plugin, "minigame_target");
     }
 
@@ -125,7 +130,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
         switch (args[0].toLowerCase()) {
             case "accept" -> accept(player);
             case "decline" -> decline(player);
-            case "start" -> startSmash(player);
+            case "start" -> startLobby(player);
             default -> error(player, "Usage: /minigames");
         }
         return true;
@@ -200,6 +205,9 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
         inventory.setItem(SLOT_DUELS, button(Material.DIAMOND_SWORD, Minigame.DUELS.label, NamedTextColor.GOLD,
                 plain(Minigame.DUELS.description, NamedTextColor.GRAY),
                 plain("Click to select", NamedTextColor.YELLOW)));
+        inventory.setItem(SLOT_ONEBOUNCE, button(sulfurCubeSpawnEgg(), Minigame.ONEBOUNCE.label, NamedTextColor.GOLD,
+                plain(Minigame.ONEBOUNCE.description, NamedTextColor.GRAY),
+                plain("Click to select", NamedTextColor.YELLOW)));
         inventory.setItem(SLOT_SMASH, button(sulfurWall(), Minigame.SMASH.label, NamedTextColor.GOLD,
                 plain(Minigame.SMASH.description, NamedTextColor.GRAY),
                 plain("Click to select", NamedTextColor.YELLOW)));
@@ -240,6 +248,15 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
             if (material != null) return material;
         }
         return Material.SANDSTONE_WALL;
+    }
+
+    /** The sulfur cube spawn egg (found by name, falling back to the slime egg if it has a different name). */
+    private static Material sulfurCubeSpawnEgg() {
+        for (String name : List.of("SULFUR_CUBE_SPAWN_EGG", "SULFUR_SPAWN_EGG")) {
+            Material material = Material.matchMaterial(name);
+            if (material != null) return material;
+        }
+        return Material.SLIME_SPAWN_EGG;
     }
 
     private ItemStack backButton() {
@@ -311,8 +328,9 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
                 }
             }
             case SELECT -> {
-                if (slot == SLOT_DUELS || slot == SLOT_SMASH) {
-                    Minigame game = slot == SLOT_DUELS ? Minigame.DUELS : Minigame.SMASH;
+                if (slot == SLOT_DUELS || slot == SLOT_ONEBOUNCE || slot == SLOT_SMASH) {
+                    Minigame game = slot == SLOT_DUELS ? Minigame.DUELS
+                            : slot == SLOT_ONEBOUNCE ? Minigame.ONEBOUNCE : Minigame.SMASH;
                     selected.put(player.getUniqueId(), game);
                     later(() -> {
                         openMainMenu(player);
@@ -389,10 +407,10 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
                 }
             }
         }
-        if (game == Minigame.SMASH) {
+        if (game != Minigame.DUELS) {
             int joined = smashLobbies.getOrDefault(host.getUniqueId(), Set.of()).size();
             if (1 + joined + outstanding >= SmashManager.MAX_PLAYERS) {
-                error(host, "Smash can have at most " + SmashManager.MAX_PLAYERS + " players, counting you.");
+                error(host, game.label + " can have at most " + SmashManager.MAX_PLAYERS + " players, counting you.");
                 return;
             }
         }
@@ -413,7 +431,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
                 .append(Component.text("[Decline]", NamedTextColor.RED, TextDecoration.BOLD)
                         .clickEvent(ClickEvent.runCommand("/minigames decline"))));
         host.sendMessage(Component.text("Invited " + target.getName() + " to " + game.label + ".", NamedTextColor.GREEN));
-        if (game == Minigame.SMASH) {
+        if (game != Minigame.DUELS) {
             host.sendMessage(Component.text("Invite more players, or use /minigames start once enough have accepted.",
                     NamedTextColor.GRAY));
         }
@@ -437,8 +455,8 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
 
-        if (invite.game() == Minigame.SMASH) {
-            joinSmashLobby(host, player);
+        if (invite.game() != Minigame.DUELS) {
+            joinLobby(host, player, invite.game());
             return;
         }
 
@@ -449,23 +467,25 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
         }
     }
 
-    private void joinSmashLobby(Player host, Player player) {
+    private void joinLobby(Player host, Player player, Minigame game) {
         Set<UUID> lobby = smashLobbies.computeIfAbsent(host.getUniqueId(), k -> new LinkedHashSet<>());
         lobby.add(player.getUniqueId());
+        lobbyGames.put(host.getUniqueId(), game);
         int total = 1 + lobby.size();
-        player.sendMessage(Component.text("You joined " + host.getName() + "'s Smash game. Waiting for them to start it.",
+        player.sendMessage(Component.text("You joined " + host.getName() + "'s " + game.label + " game. Waiting for them to start it.",
                 NamedTextColor.GREEN));
         host.sendMessage(Component.text(player.getName() + " joined. " + total + " players ready. ", NamedTextColor.GREEN)
-                .append(Component.text("[Start Smash]", NamedTextColor.GOLD, TextDecoration.BOLD)
+                .append(Component.text("[Start " + game.label + "]", NamedTextColor.GOLD, TextDecoration.BOLD)
                         .clickEvent(ClickEvent.runCommand("/minigames start"))));
-        if (total >= SmashManager.MAX_PLAYERS) startSmash(host);
+        if (total >= SmashManager.MAX_PLAYERS) startLobby(host);
     }
 
-    /** /minigames start: the host starts Smash with everyone who has accepted so far. */
-    private void startSmash(Player host) {
+    /** /minigames start: the host starts their game (Smash or One-Bounce) with everyone who has accepted so far. */
+    private void startLobby(Player host) {
         Set<UUID> lobby = smashLobbies.get(host.getUniqueId());
-        if (lobby == null) {
-            error(host, "You haven't invited anyone to Smash. Use /minigames, select Smash and invite players.");
+        Minigame game = lobbyGames.get(host.getUniqueId());
+        if (lobby == null || game == null) {
+            error(host, "You haven't invited anyone. Use /minigames, select Smash or One-Bounce and invite players.");
             return;
         }
         List<Player> players = new ArrayList<>();
@@ -475,15 +495,16 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
             if (p != null) players.add(p);
         }
         if (players.size() < 2) {
-            error(host, "Nobody has accepted yet. Smash needs at least 2 players.");
+            error(host, "Nobody has accepted yet. " + game.label + " needs at least 2 players.");
             return;
         }
-        String problem = smash.start(players);
+        String problem = game == Minigame.ONEBOUNCE ? oneBounce.start(players) : smash.start(players);
         if (problem != null) {
             players.forEach(p -> error(p, problem));
             return;
         }
         smashLobbies.remove(host.getUniqueId());
+        lobbyGames.remove(host.getUniqueId());
         invites.values().removeIf(invite -> invite.host().equals(host.getUniqueId())); // late invites are void
     }
 
@@ -504,6 +525,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
         selected.remove(id);
         invites.remove(id);
         smashLobbies.remove(id);
+        lobbyGames.remove(id);
         smashLobbies.values().forEach(lobby -> lobby.remove(id));
         invites.values().removeIf(invite -> invite.host().equals(id));
     }

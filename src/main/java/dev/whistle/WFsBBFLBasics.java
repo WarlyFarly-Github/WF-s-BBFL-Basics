@@ -72,7 +72,11 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
         matches.setSmash(smash);
         getServer().getPluginManager().registerEvents(smash, this);
 
-        MinigameManager minigames = new MinigameManager(this, matches, smash);
+        OneBounceManager oneBounce = new OneBounceManager(this, matches, celebration);
+        matches.setOneBounce(oneBounce);
+        getServer().getPluginManager().registerEvents(oneBounce, this);
+
+        MinigameManager minigames = new MinigameManager(this, matches, smash, oneBounce);
         getServer().getPluginManager().registerEvents(minigames, this);
         PluginCommand minigamesCommand = getCommand("minigames");
         if (minigamesCommand != null) {
