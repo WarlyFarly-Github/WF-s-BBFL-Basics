@@ -105,6 +105,8 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
     private final Map<UUID, Invite> invites = new HashMap<>();
     /** Lobbies for the games with more than two players: the host, and everyone who has accepted their invite so far. */
     private final Map<UUID, Set<UUID>> smashLobbies = new HashMap<>();
+    /** Operators who opened the menu with /minigames bypass: they can start a game without enough players. */
+    private final Set<UUID> bypassing = new LinkedHashSet<>();
     private final Map<UUID, Minigame> lobbyGames = new HashMap<>();
 
     MinigameManager(JavaPlugin plugin, MatchManager matches, SmashManager smash, OneBounceManager oneBounce) {
@@ -124,10 +126,12 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
             return true;
         }
         if (args.length == 0) {
+            bypassing.remove(player.getUniqueId());
             openMainMenu(player);
             return true;
         }
         switch (args[0].toLowerCase()) {
+            case "bypass" -> bypass(player);
             case "accept" -> accept(player);
             case "decline" -> decline(player);
             case "start" -> startLobby(player);
@@ -139,9 +143,24 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return List.of("accept", "decline", "start").stream().filter(s -> s.startsWith(args[0].toLowerCase())).toList();
+            List<String> options = new ArrayList<>(List.of("accept", "decline", "start"));
+            if (sender.hasPermission("wfsbbfl.minigamesbypass")) options.add("bypass");
+            return options.stream().filter(s -> s.startsWith(args[0].toLowerCase())).toList();
         }
         return List.of();
+    }
+
+    /** /minigames bypass (operators only): the normal menu, but /minigames start works without enough players. */
+    private void bypass(Player player) {
+        if (!player.hasPermission("wfsbbfl.minigamesbypass")) {
+            error(player, "Only operators can use /minigames bypass.");
+            return;
+        }
+        if (!checkFree(player)) return;
+        bypassing.add(player.getUniqueId());
+        player.sendMessage(Component.text("Bypass mode: select Smash or One-Bounce, then use /minigames start to play "
+                + "without inviting anyone (alone, or with whoever has accepted).", NamedTextColor.GOLD));
+        openMainMenu(player);
     }
 
     // ------------------------------------------------------------------ menus
@@ -194,7 +213,9 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
                 plain("Selected: " + (game == null ? "none" : game.label), NamedTextColor.GRAY)));
         inventory.setItem(SLOT_INVITE, button(Material.DIAMOND, "Invite Players", NamedTextColor.BLUE,
                 game == null ? plain("Select a minigame first", NamedTextColor.RED)
-                        : plain("Invite one player to " + game.label, NamedTextColor.GRAY)));
+                        : plain("Invite one player to " + game.label, NamedTextColor.GRAY),
+                bypassing.contains(player.getUniqueId())
+                        ? plain("Bypass: /minigames start works alone", NamedTextColor.GOLD) : Component.empty()));
         player.openInventory(inventory);
     }
 
@@ -482,10 +503,18 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
 
     /** /minigames start: the host starts their game (Smash or One-Bounce) with everyone who has accepted so far. */
     private void startLobby(Player host) {
-        Set<UUID> lobby = smashLobbies.get(host.getUniqueId());
+        boolean bypass = bypassing.contains(host.getUniqueId());
         Minigame game = lobbyGames.get(host.getUniqueId());
-        if (lobby == null || game == null) {
+        if (game == null && bypass) game = selected.get(host.getUniqueId());
+        Set<UUID> lobby = smashLobbies.get(host.getUniqueId());
+        if (lobby == null && bypass) lobby = Set.of();
+
+        if (game == null || lobby == null) {
             error(host, "You haven't invited anyone. Use /minigames, select Smash or One-Bounce and invite players.");
+            return;
+        }
+        if (game == Minigame.DUELS) {
+            error(host, "Duels needs a second player, even with bypass.");
             return;
         }
         List<Player> players = new ArrayList<>();
@@ -494,17 +523,18 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
             Player p = Bukkit.getPlayer(id);
             if (p != null) players.add(p);
         }
-        if (players.size() < 2) {
+        if (players.size() < 2 && !bypass) {
             error(host, "Nobody has accepted yet. " + game.label + " needs at least 2 players.");
             return;
         }
-        String problem = game == Minigame.ONEBOUNCE ? oneBounce.start(players) : smash.start(players);
+        String problem = game == Minigame.ONEBOUNCE ? oneBounce.start(players, bypass) : smash.start(players, bypass);
         if (problem != null) {
             players.forEach(p -> error(p, problem));
             return;
         }
         smashLobbies.remove(host.getUniqueId());
         lobbyGames.remove(host.getUniqueId());
+        bypassing.remove(host.getUniqueId());
         invites.values().removeIf(invite -> invite.host().equals(host.getUniqueId())); // late invites are void
     }
 
@@ -526,6 +556,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
         invites.remove(id);
         smashLobbies.remove(id);
         lobbyGames.remove(id);
+        bypassing.remove(id);
         smashLobbies.values().forEach(lobby -> lobby.remove(id));
         invites.values().removeIf(invite -> invite.host().equals(id));
     }

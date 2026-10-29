@@ -113,10 +113,15 @@ final class OneBounceManager implements Listener {
      * started on flat open ground. Returns a problem or null.
      */
     String start(List<Player> players) {
+        return start(players, false);
+    }
+
+    /** With bypass (operators only, from /minigames bypass) the game can start with a single player, to practise. */
+    String start(List<Player> players, boolean bypass) {
         List<Player> ready = players.stream()
                 .filter(p -> p.isOnline() && !matches.isInMatch(p.getUniqueId()) && !matches.isWatching(p.getUniqueId()))
                 .toList();
-        if (ready.size() < 2) return "One-Bounce needs at least 2 free players.";
+        if (ready.size() < (bypass ? 1 : 2)) return "One-Bounce needs at least 2 free players.";
         if (ready.size() > MAX_PLAYERS) return "One-Bounce can have at most " + MAX_PLAYERS + " players.";
 
         Location centre = ready.get(0).getLocation().clone();
@@ -293,6 +298,9 @@ final class OneBounceManager implements Listener {
                 target = p;
             }
         }
+
+        // Practising alone (bypass): nobody else to land near, so it counts as landing in your own area.
+        if (target == null && game.alive.size() == 1) target = hitter;
 
         if (target == null) {
             if (hitter != null) eliminate(game, hitter, "a bad punch: the ball didn't land in anyone's area");

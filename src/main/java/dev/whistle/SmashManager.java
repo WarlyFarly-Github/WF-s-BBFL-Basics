@@ -113,10 +113,15 @@ final class SmashManager implements Listener {
 
     /** Starts a game for these players on a random finished smash stadium nobody is using. Returns a problem or null. */
     String start(List<Player> players) {
+        return start(players, false);
+    }
+
+    /** With bypass (operators only, from /minigames bypass) the game can start with a single player. */
+    String start(List<Player> players, boolean bypass) {
         List<Player> ready = players.stream()
                 .filter(p -> p.isOnline() && !matches.isInMatch(p.getUniqueId()) && !matches.isWatching(p.getUniqueId()))
                 .toList();
-        if (ready.size() < 2) return "Smash needs at least 2 free players.";
+        if (ready.size() < (bypass ? 1 : 2)) return "Smash needs at least 2 free players.";
         if (ready.size() > MAX_PLAYERS) return "Smash can have at most " + MAX_PLAYERS + " players.";
 
         List<SmashStadium> free = new ArrayList<>();
@@ -343,7 +348,8 @@ final class SmashManager implements Listener {
         boolean serve = game.lastHitter == null && game.pending == null;
         if (!serve) {
             double mine = player.getLocation().distance(centre);
-            for (UUID otherId : game.alive) {
+            // Stealing the ball is only a warning while 3 or more players are left; with 2 left it is allowed.
+            for (UUID otherId : game.alive.size() > 2 ? game.alive : Set.<UUID>of()) {
                 if (otherId.equals(id)) continue;
                 Player other = Bukkit.getPlayer(otherId);
                 if (other == null || !other.getWorld().equals(centre.getWorld())) continue;
@@ -397,6 +403,10 @@ final class SmashManager implements Listener {
             finish(game);
         } else {
             updateBar(game);
+            if (game.alive.size() == 2) {
+                broadcast(game, Component.text("Only 2 players left: stealing the ball is no longer a warning.",
+                        NamedTextColor.YELLOW, TextDecoration.BOLD));
+            }
             resetAndServe(game);
         }
     }
