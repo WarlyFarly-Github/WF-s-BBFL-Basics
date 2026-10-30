@@ -40,10 +40,15 @@ final class SmashManager implements Listener {
     private static final int FIRST_COUNTDOWN_SECONDS = 5;
     private static final int SERVE_COUNTDOWN_SECONDS = 3;
     private static final double STEAL_RADIUS = 2.5;     // someone this close (and closer than you) is being stolen from
-    private static final int HIT_COOLDOWN_TICKS = 10;   // one swing can't count as several hits
+    private static final int TAP_WINDOW_TICKS = 10;      // the same player may keep tapping the ball within half a second
+    private static final double TRIGGER_TOLERANCE = 0.25; // the wall counts a little before the ball's edge touches it
     private static final int WALL_TIMEOUT_TICKS = 160;  // 8 seconds for a hit ball to reach the wall
     private static final int IDLE_RESET_TICKS = 400;    // a ball nobody touches for 20 seconds goes back to the middle
     private static final int MAX_WARNINGS = 2;
+    private static final int STALL_GRACE_TICKS = 12;      // a fresh hit gets this long before it can count as stalled
+    private static final int STALL_TICKS = 15;            // this long barely moving after a hit = the ball lost its momentum
+    private static final double STALL_SPEED = 0.03;       // blocks per tick (sideways) under which the ball counts as stopped
+    private static final int WALL_SOUND_COOLDOWN_TICKS = 4;
 
 
     // Hits and the wall are livelier in Smash than in football.
@@ -73,6 +78,9 @@ final class SmashManager implements Listener {
         private long tick;       // never reset, so hit cooldowns keep working across countdowns
         private long phaseTicks;  // ticks since this countdown began
         private long pendingSince;
+        private Location stallPrev;   // where the ball was last tick, for the "lost its momentum" check
+        private int stalledTicks;     // consecutive ticks the hit ball has hardly moved
+        private long lastWallSound;
         private long lastActivity;
         private Phase phase = Phase.COUNTDOWN;
         private int countdownLeft;
@@ -116,7 +124,7 @@ final class SmashManager implements Listener {
         return start(players, false);
     }
 
-    /** With bypass (operators only, from /minigames bypass) the game can start with a single player. */
+    /** With bypass (operators only, from /challenge bypass) the game can start with a single player. */
     String start(List<Player> players, boolean bypass) {
         List<Player> ready = players.stream()
                 .filter(p -> p.isOnline() && !matches.isInMatch(p.getUniqueId()) && !matches.isWatching(p.getUniqueId()))
@@ -216,10 +224,6 @@ final class SmashManager implements Listener {
         }
 
         Location centre = ballCentre(game);
-        if (!game.stadium.boundsContain(centre)) {
-            outOfBounds(game);
-            return;
-        }
 
         // Before the serve (and after a reset) the ball only moves when punched: undo any nudge.
         if (game.lastHitter == null && game.pending == null) {
@@ -227,16 +231,32 @@ final class SmashManager implements Listener {
             if (still.getX() != 0 || still.getZ() != 0) game.ball.setVelocity(new Vector(0, still.getY(), 0));
         }
 
+        // The wall is checked before the bounds, so a ball that reaches the wall near the edge of the bounds still counts.
         boolean hitWall = bounceOffWall(game, centre);
+        if (!hitWall && !game.stadium.boundsContain(centre)) {
+            outOfBounds(game);
+            return;
+        }
+
+        if (hitWall && game.tick - game.lastWallSound >= WALL_SOUND_COOLDOWN_TICKS) {
+            game.lastWallSound = game.tick;
+            for (Player p : players(game)) p.playSound(p.getLocation(), "block.note_block.bell", 1.0f, 1.2f);
+        }
 
         if (game.pending != null) {
             if (hitWall) {
                 game.pending = null; // that hit reached the wall, so it counts
+                game.stalledTicks = 0;
                 game.lastActivity = game.tick;
                 for (Player p : players(game)) p.sendActionBar(Component.text("Wall hit!", NamedTextColor.GREEN, TextDecoration.BOLD));
             } else if (game.tick - game.pendingSince > WALL_TIMEOUT_TICKS) {
                 Player hitter = Bukkit.getPlayer(game.pending);
                 if (hitter != null) eliminate(game, hitter, "the ball never reached the wall");
+                else resetAndServe(game);
+            } else if (lostMomentum(game, centre)) {
+                // The ball has stopped rolling before it got anywhere near the wall: the hitter is out.
+                Player hitter = Bukkit.getPlayer(game.pending);
+                if (hitter != null) eliminate(game, hitter, "the ball lost its momentum before it hit the wall");
                 else resetAndServe(game);
             }
         } else if (game.tick - game.lastActivity > IDLE_RESET_TICKS) {
@@ -262,12 +282,13 @@ final class SmashManager implements Listener {
 
         // Normally the ball is in the trigger zone. A hard punch can move it right across the zone in one tick,
         // so also check whether it crossed the trigger line since the last tick.
-        boolean inZone = stadium.inTriggerZone(centre, trigger);
+        double edge = trigger + TRIGGER_TOLERANCE; // the ball may be stopped by the blocks a hair before the line
+        boolean inZone = stadium.inTriggerZone(centre, edge);
         Location crossing = null;
         if (!inZone && previous != null && previous.getWorld().equals(centre.getWorld())) {
             double before = stadium.frontDistance(previous);
-            if (before > trigger && front <= trigger) {
-                double t = (before - trigger) / (before - front);
+            if (before > edge && front <= edge) {
+                double t = (before - edge) / (before - front);
                 Location point = previous.clone().add(centre.clone().subtract(previous).toVector().multiply(t));
                 if (stadium.alongWall(point)) crossing = point;
             }
@@ -284,7 +305,7 @@ final class SmashManager implements Listener {
             v = centre.clone().subtract(previous).toVector();
         }
         double intoPitch = v.getX() * nx + v.getZ() * nz;
-        if (intoPitch >= 0 && front >= 0 && crossing == null) return false; // moving away: not a new hit
+        // (A ball already stopped by the blocks, or sliding along the wall, still counts as reaching it.)
 
         // A strong recoil: the ball keeps most of a hard hit and is always pushed clearly back out.
         double impact = Math.max(0, -intoPitch);
@@ -313,6 +334,25 @@ final class SmashManager implements Listener {
         return true;
     }
 
+    /**
+     * Whether a hit ball that hasn't reached the wall has run out of momentum: after a short grace period it has hardly
+     * moved sideways for a while, and isn't still rising or falling through the air.
+     */
+    private boolean lostMomentum(Game game, Location centre) {
+        Location previous = game.stallPrev;
+        game.stallPrev = centre.clone();
+        if (game.tick - game.pendingSince < STALL_GRACE_TICKS || previous == null || !previous.getWorld().equals(centre.getWorld())) {
+            game.stalledTicks = 0;
+            return false;
+        }
+        double sideways = Math.hypot(centre.getX() - previous.getX(), centre.getZ() - previous.getZ());
+        double vertical = Math.abs(centre.getY() - previous.getY());
+        // Only a ball resting on something counts as stopped (one hanging at the top of its arc is still moving).
+        if (sideways < STALL_SPEED && vertical < 0.02 && game.ball.isOnGround()) game.stalledTicks++;
+        else game.stalledTicks = 0;
+        return game.stalledTicks >= STALL_TICKS;
+    }
+
     private void outOfBounds(Game game) {
         for (Player p : players(game)) {
             p.sendActionBar(Component.text("Out of bounds!", NamedTextColor.YELLOW, TextDecoration.BOLD));
@@ -333,20 +373,23 @@ final class SmashManager implements Listener {
         UUID id = player.getUniqueId();
         Game game = byPlayer.get(id);
         if (game == null || !game.alive.contains(id) || game.phase != Phase.PLAY) return;
-        if (game.tick - game.lastHit.getOrDefault(id, -100L) < HIT_COOLDOWN_TICKS) return; // one swing, one hit
+        // Double, triple, ... taps are fine as long as each comes within half a second of the last.
+        long previousHit = game.lastHit.getOrDefault(id, -1000L);
+        boolean tap = id.equals(game.lastHitter) && game.tick - previousHit <= TAP_WINDOW_TICKS;
         game.lastHit.put(id, game.tick);
         game.lastActivity = game.tick;
 
-        // Hitting it twice in a row: out.
-        if (id.equals(game.lastHitter)) {
+        // Hitting it again after that half second, with nobody else in between: out.
+        if (id.equals(game.lastHitter) && !tap) {
             eliminate(game, player, "hit the ball twice in a row");
             return;
         }
 
         // Stealing it from someone who was right next to it, or hitting it before it reached the wall: a warning.
+        // (A tap on your own ball is neither.)
         Location centre = ballCentre(game);
         boolean serve = game.lastHitter == null && game.pending == null;
-        if (!serve) {
+        if (!serve && !tap) {
             double mine = player.getLocation().distance(centre);
             // Stealing the ball is only a warning while 3 or more players are left; with 2 left it is allowed.
             for (UUID otherId : game.alive.size() > 2 ? game.alive : Set.<UUID>of()) {
@@ -369,6 +412,8 @@ final class SmashManager implements Listener {
         game.pending = id;
         game.pendingSince = game.tick;
         game.lastHitter = id;
+        game.stalledTicks = 0;
+        game.stallPrev = null;
     }
 
     /** Gives a warning. Returns true if that put the player out (two warnings). */
@@ -414,6 +459,8 @@ final class SmashManager implements Listener {
     private void resetAndServe(Game game) {
         game.pending = null;
         game.lastHitter = null;
+        game.stalledTicks = 0;
+        game.stallPrev = null;
         beginCountdown(game, SERVE_COUNTDOWN_SECONDS);
     }
 

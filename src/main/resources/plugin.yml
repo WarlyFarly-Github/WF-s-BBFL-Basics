@@ -23,9 +23,13 @@ commands:
     description: Create and edit Smash stadiums (operators only).
     usage: /smashstadium <create|delete|list|info|edit|confirm|bounds|wallpoint1|wallpoint2|wallheight|wallfront>
     permission: wfsbbfl.smashstadium
-  minigames:
-    description: Open the minigames menu (Duels, Smash, One-Bounce).
-    usage: /minigames [accept|decline|start|bypass]
+  challenge:
+    description: Open the challenge menu (Duels, Smash, One-Bounce).
+    usage: /challenge [accept|decline|start|bypass]
+  obstadium:
+    description: Create and edit One-Bounce stadiums (operators only).
+    usage: /obstadium <create|delete|list|info|setballpos|setradius|bounds|edit|confirm>
+    permission: wfsbbfl.obstadium
   setlobby:
     description: Set a lobby location (operators only).
     usage: /setlobby quickmatch
@@ -56,8 +60,11 @@ permissions:
   wfsbbfl.smashstadium:
     description: Allows /smashstadium
     default: op
-  wfsbbfl.minigamesbypass:
-    description: Allows /minigames bypass
+  wfsbbfl.obstadium:
+    description: Allows /obstadium
+    default: op
+  wfsbbfl.challengebypass:
+    description: Allows /challenge bypass
     default: op
   wfsbbfl.setlobby:
     description: Allows /setlobby

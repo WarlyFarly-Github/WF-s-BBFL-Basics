@@ -35,12 +35,14 @@ import java.util.UUID;
  * One-Bounce: players stand in a circle and punch the ball to each other. After a punch the ball must land (its one
  * bounce) inside another player's area; that player must then punch it before it bounces a second time. A bad
  * punch puts the puncher out; a miss puts the receiver out. The last player left wins.
+ * With a finished /obstadium arena the game is played inside its circle (a ball past the radius, or outside its bounds if it has them, is out of play); with
+ * none, it is played in a ring around the host on open ground.
  */
 final class OneBounceManager implements Listener {
 
     static final int MAX_PLAYERS = 10;
 
-    private static final double ZONE_RADIUS = 2.0;       // the area around each player the ball must land in
+    private static final double ZONE_RADIUS = 3.5;       // the area around each player the ball must land in
     private static final double RING_SPACING = 7.0;      // blocks between neighbours in the circle
     private static final double MIN_RING_RADIUS = 4.0;
     private static final double MAX_STRAY = 25.0;        // further than this from the circle is out of play
@@ -50,8 +52,9 @@ final class OneBounceManager implements Listener {
     private static final int SERVE_TIMEOUT_TICKS = 400;  // 20 seconds to serve
     private static final int FLIGHT_TIMEOUT_TICKS = 160; // 8 seconds for a punched ball to land
     private static final int RECEIVE_TIMEOUT_TICKS = 60; // 3 seconds to punch a ball that has bounced once
-    private static final double HOP_KEEP = 0.85;         // share of its fall speed it hops back up with
-    private static final double HOP_MIN = 0.40;          // so the one bounce is always a visible hop
+    private static final double HIT_LIFT = 0.85;         // upward speed a punch gives the ball (football is 0.35)
+    private static final double HOP_KEEP = 1.0;          // share of its fall speed it hops back up with
+    private static final double HOP_MIN = 0.75;          // so the one bounce is always a big hop
 
     private enum Phase { COUNTDOWN, SERVE, FLIGHT, RECEIVE }
 
@@ -63,7 +66,9 @@ final class OneBounceManager implements Listener {
         private final Map<UUID, Long> lastHit = new HashMap<>();
         private final BossBar bar = BossBar.bossBar(Component.empty(), 1.0f, BossBar.Color.GREEN, BossBar.Overlay.PROGRESS);
         private final Location centre;
-        private final double radius;
+        private final double radius;       // the ring the players stand on
+        private final double limit;        // how far from the centre the ball may go before it is out of play
+        private final OneBounceStadium stadium; // null when playing without a stadium
         private SulfurCube ball;
         private Phase phase = Phase.COUNTDOWN;
         private UUID hitter;    // who punched the ball last
@@ -76,22 +81,26 @@ final class OneBounceManager implements Listener {
         private Vector lastVelocity = new Vector(0, 0, 0);
         private BukkitTask task;
 
-        private Game(Location centre, double radius) {
+        private Game(Location centre, double radius, double limit, OneBounceStadium stadium) {
             this.centre = centre;
             this.radius = radius;
+            this.limit = limit;
+            this.stadium = stadium;
         }
     }
 
     private final JavaPlugin plugin;
     private final MatchManager matches;
+    private final OneBounceStadiums stadiums;
     private final Celebration celebration;
     private final Random random = new Random();
     private final Map<UUID, Game> byPlayer = new HashMap<>();
     private final List<Game> games = new ArrayList<>();
 
-    OneBounceManager(JavaPlugin plugin, MatchManager matches, Celebration celebration) {
+    OneBounceManager(JavaPlugin plugin, MatchManager matches, OneBounceStadiums stadiums, Celebration celebration) {
         this.plugin = plugin;
         this.matches = matches;
+        this.stadiums = stadiums;
         this.celebration = celebration;
     }
 
@@ -109,14 +118,15 @@ final class OneBounceManager implements Listener {
     // ------------------------------------------------------------------ starting
 
     /**
-     * Starts a game for these players in a circle around the first one (the host), on the host's level, so it should be
-     * started on flat open ground. Returns a problem or null.
+     * Starts a game for these players on a random finished One-Bounce stadium nobody is using. If no stadium has been
+     * made yet, they play in a circle around the first player (the host) on the host's level instead, so that should be
+     * flat open ground. Returns a problem or null.
      */
     String start(List<Player> players) {
         return start(players, false);
     }
 
-    /** With bypass (operators only, from /minigames bypass) the game can start with a single player, to practise. */
+    /** With bypass (operators only, from /challenge bypass) the game can start with a single player, to practise. */
     String start(List<Player> players, boolean bypass) {
         List<Player> ready = players.stream()
                 .filter(p -> p.isOnline() && !matches.isInMatch(p.getUniqueId()) && !matches.isWatching(p.getUniqueId()))
@@ -124,10 +134,25 @@ final class OneBounceManager implements Listener {
         if (ready.size() < (bypass ? 1 : 2)) return "One-Bounce needs at least 2 free players.";
         if (ready.size() > MAX_PLAYERS) return "One-Bounce can have at most " + MAX_PLAYERS + " players.";
 
-        Location centre = ready.get(0).getLocation().clone();
-        centre.setPitch(0);
-        double radius = Math.max(MIN_RING_RADIUS, ready.size() * RING_SPACING / (2 * Math.PI));
-        Game game = new Game(centre, radius);
+        Game game;
+        List<OneBounceStadium> finished = stadiums.all().stream().filter(OneBounceStadium::isComplete).toList();
+        if (finished.isEmpty()) {
+            Location centre = ready.get(0).getLocation().clone();
+            centre.setPitch(0);
+            double radius = Math.max(MIN_RING_RADIUS, ready.size() * RING_SPACING / (2 * Math.PI));
+            game = new Game(centre, radius, radius + MAX_STRAY, null);
+        } else {
+            List<OneBounceStadium> free = finished.stream()
+                    .filter(st -> games.stream().noneMatch(g -> g.stadium == st)).toList();
+            if (free.isEmpty()) return "Every One-Bounce stadium is in use right now, so One-Bounce can't start.";
+            OneBounceStadium stadium = free.get(random.nextInt(free.size()));
+            // Players stand on a ring well inside the circle, leaving room for the landing areas around them.
+            double ring = Math.max(MIN_RING_RADIUS, Math.min(stadium.radius * 0.6, stadium.radius - ZONE_RADIUS - 1));
+            ring = Math.min(ring, stadium.radius - 1);
+            game = new Game(stadium.centre(), ring, stadium.radius, stadium);
+        }
+        Location centre = game.centre;
+        double radius = game.radius;
         games.add(game);
 
         for (int i = 0; i < ready.size(); i++) {
@@ -145,7 +170,8 @@ final class OneBounceManager implements Listener {
             p.teleport(spot);
             p.setGameMode(GameMode.ADVENTURE);
             p.showBossBar(game.bar);
-            p.sendMessage(Component.text("One-Bounce has started! Punch the ball so it lands in another player's area "
+            p.sendMessage(Component.text("One-Bounce has started" + (game.stadium != null ? " on " + game.stadium.name : "")
+                    + "! Punch the ball so it lands in another player's area "
                     + "(the ring around them), then punch it back when it lands in yours. Only one bounce allowed.",
                     NamedTextColor.GREEN));
         }
@@ -248,10 +274,14 @@ final class OneBounceManager implements Listener {
         game.lastVelocity = game.ball.getVelocity().clone();
 
         Location centre = game.ball.getBoundingBox().getCenter().toLocation(game.ball.getWorld());
-        if (centre.getWorld().equals(game.centre.getWorld())
-                && Math.hypot(centre.getX() - game.centre.getX(), centre.getZ() - game.centre.getZ()) > game.radius + MAX_STRAY) {
-            stray(game);
-            return;
+        if (centre.getWorld().equals(game.centre.getWorld())) {
+            boolean outOfPlay = game.stadium != null && game.stadium.hasBounds()
+                    ? !game.stadium.boundsContain(centre) // the bounds are the edge of play
+                    : Math.hypot(centre.getX() - game.centre.getX(), centre.getZ() - game.centre.getZ()) > game.limit;
+            if (outOfPlay) {
+                stray(game);
+                return;
+            }
         }
 
         switch (game.phase) {
@@ -331,6 +361,7 @@ final class OneBounceManager implements Listener {
         game.lastHit.put(id, game.tick);
 
         game.ball.setGravity(true);
+        velocity.setY(HIT_LIFT); // punches send the ball high
         game.ball.setVelocity(velocity);
         game.hitter = id;
         game.receiver = null;

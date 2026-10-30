@@ -1064,6 +1064,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     SulfurCube createBallEntity(Location location, Component name, boolean pushable) {
         return location.getWorld().spawn(location, SulfurCube.class, cube -> {
             cube.setCollidable(pushable);
+            if (!pushable) {
+                cube.setMaximumNoDamageTicks(0); // challenge balls can be tapped again straight away
+                cube.setNoDamageTicks(0);
+            }
             cube.setSize(2);
             cube.setAdult();
             cube.setAgeLock(true);
@@ -1539,7 +1543,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             p.sendMessage(overview);
         }
         if (match.duel && celebration != null) {
-            // Duels are a minigame: the winner (if the score isn't level) gets the celebration, everyone the sound.
+            // Duels are a challenge: the winner (if the score isn't level) gets the celebration, everyone the sound.
             Player winner = null;
             if (match.redScore != match.blueScore) {
                 Team winning = match.redScore > match.blueScore ? Team.RED : Team.BLUE;

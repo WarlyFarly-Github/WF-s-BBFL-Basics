@@ -39,12 +39,12 @@ import java.util.LinkedHashSet;
 import java.util.UUID;
 
 /**
- * /minigames: a chest menu (like /match create) to pick a minigame and invite someone to it. The only minigame so far
+ * /challenge: a chest menu (like /match create) to pick a challenge and invite someone to it. The only challenge so far
  * is Duels, a 5 minute 1v1 quickmatch with no red and blue teams.
  */
-final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
+final class ChallengeManager implements CommandExecutor, TabCompleter, Listener {
 
-    enum Minigame {
+    enum Challenge {
         DUELS("Duels", "1v1, 5 minutes"),
         SMASH("Smash", "hit the ball against the wall, 2-" + SmashManager.MAX_PLAYERS + " players"),
         ONEBOUNCE("One-Bounce", "punch the ball to others, one bounce only, 2-" + OneBounceManager.MAX_PLAYERS + " players");
@@ -52,7 +52,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
         final String label;
         final String description;
 
-        Minigame(String label, String description) {
+        Challenge(String label, String description) {
             this.label = label;
             this.description = description;
         }
@@ -79,7 +79,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     /** A pending invite, kept under the invited player's id. */
-    private record Invite(UUID host, Minigame game, long time) {}
+    private record Invite(UUID host, Challenge game, long time) {}
 
     private static final long INVITE_TIMEOUT_MS = 60_000;
 
@@ -101,20 +101,20 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
     private final SmashManager smash;
     private final OneBounceManager oneBounce;
     private final NamespacedKey targetKey;
-    private final Map<UUID, Minigame> selected = new HashMap<>();
+    private final Map<UUID, Challenge> selected = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
     /** Lobbies for the games with more than two players: the host, and everyone who has accepted their invite so far. */
     private final Map<UUID, Set<UUID>> smashLobbies = new HashMap<>();
-    /** Operators who opened the menu with /minigames bypass: they can start a game without enough players. */
+    /** Operators who opened the menu with /challenge bypass: they can start a game without enough players. */
     private final Set<UUID> bypassing = new LinkedHashSet<>();
-    private final Map<UUID, Minigame> lobbyGames = new HashMap<>();
+    private final Map<UUID, Challenge> lobbyGames = new HashMap<>();
 
-    MinigameManager(JavaPlugin plugin, MatchManager matches, SmashManager smash, OneBounceManager oneBounce) {
+    ChallengeManager(JavaPlugin plugin, MatchManager matches, SmashManager smash, OneBounceManager oneBounce) {
         this.plugin = plugin;
         this.matches = matches;
         this.smash = smash;
         this.oneBounce = oneBounce;
-        this.targetKey = new NamespacedKey(plugin, "minigame_target");
+        this.targetKey = new NamespacedKey(plugin, "challenge_target");
     }
 
     // ------------------------------------------------------------------ command
@@ -135,7 +135,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
             case "accept" -> accept(player);
             case "decline" -> decline(player);
             case "start" -> startLobby(player);
-            default -> error(player, "Usage: /minigames");
+            default -> error(player, "Usage: /challenge");
         }
         return true;
     }
@@ -144,21 +144,21 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
             List<String> options = new ArrayList<>(List.of("accept", "decline", "start"));
-            if (sender.hasPermission("wfsbbfl.minigamesbypass")) options.add("bypass");
+            if (sender.hasPermission("wfsbbfl.challengebypass")) options.add("bypass");
             return options.stream().filter(s -> s.startsWith(args[0].toLowerCase())).toList();
         }
         return List.of();
     }
 
-    /** /minigames bypass (operators only): the normal menu, but /minigames start works without enough players. */
+    /** /challenge bypass (operators only): the normal menu, but /challenge start works without enough players. */
     private void bypass(Player player) {
-        if (!player.hasPermission("wfsbbfl.minigamesbypass")) {
-            error(player, "Only operators can use /minigames bypass.");
+        if (!player.hasPermission("wfsbbfl.challengebypass")) {
+            error(player, "Only operators can use /challenge bypass.");
             return;
         }
         if (!checkFree(player)) return;
         bypassing.add(player.getUniqueId());
-        player.sendMessage(Component.text("Bypass mode: select Smash or One-Bounce, then use /minigames start to play "
+        player.sendMessage(Component.text("Bypass mode: select Smash or One-Bounce, then use /challenge start to play "
                 + "without inviting anyone (alone, or with whoever has accepted).", NamedTextColor.GOLD));
         openMainMenu(player);
     }
@@ -189,7 +189,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
         return inventory;
     }
 
-    /** Whether the player is free to start a minigame; tells them why not if they aren't. */
+    /** Whether the player is free to start a challenge; tells them why not if they aren't. */
     private boolean checkFree(Player player) {
         if (matches.isInMatch(player.getUniqueId())) {
             error(player, "You are already in a match.");
@@ -202,35 +202,35 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
         return true;
     }
 
-    /** Main menu: Select Minigame (lime concrete) and Invite Players (diamond). */
+    /** Main menu: Select Challenge (lime concrete) and Invite Players (diamond). */
     private void openMainMenu(Player player) {
         if (!checkFree(player)) return;
-        Minigame game = selected.get(player.getUniqueId());
+        Challenge game = selected.get(player.getUniqueId());
 
         Gui holder = new Gui(MenuType.MAIN, 0, 0);
-        Inventory inventory = newMenu(holder, "Minigames");
-        inventory.setItem(SLOT_SELECT, button(Material.LIME_CONCRETE, "Select Minigame", NamedTextColor.GREEN,
+        Inventory inventory = newMenu(holder, "Challenges");
+        inventory.setItem(SLOT_SELECT, button(Material.LIME_CONCRETE, "Select Challenge", NamedTextColor.GREEN,
                 plain("Selected: " + (game == null ? "none" : game.label), NamedTextColor.GRAY)));
         inventory.setItem(SLOT_INVITE, button(Material.DIAMOND, "Invite Players", NamedTextColor.BLUE,
-                game == null ? plain("Select a minigame first", NamedTextColor.RED)
+                game == null ? plain("Select a challenge first", NamedTextColor.RED)
                         : plain("Invite one player to " + game.label, NamedTextColor.GRAY),
                 bypassing.contains(player.getUniqueId())
-                        ? plain("Bypass: /minigames start works alone", NamedTextColor.GOLD) : Component.empty()));
+                        ? plain("Bypass: /challenge start works alone", NamedTextColor.GOLD) : Component.empty()));
         player.openInventory(inventory);
     }
 
-    /** Select menu: one button per minigame (just Duels for now), in the middle. */
+    /** Select menu: one button per challenge (just Duels for now), in the middle. */
     private void openSelectMenu(Player player) {
         Gui holder = new Gui(MenuType.SELECT, 0, 0);
-        Inventory inventory = newMenu(holder, "Select Minigame");
-        inventory.setItem(SLOT_DUELS, button(Material.DIAMOND_SWORD, Minigame.DUELS.label, NamedTextColor.GOLD,
-                plain(Minigame.DUELS.description, NamedTextColor.GRAY),
+        Inventory inventory = newMenu(holder, "Select Challenge");
+        inventory.setItem(SLOT_DUELS, button(Material.DIAMOND_SWORD, Challenge.DUELS.label, NamedTextColor.GOLD,
+                plain(Challenge.DUELS.description, NamedTextColor.GRAY),
                 plain("Click to select", NamedTextColor.YELLOW)));
-        inventory.setItem(SLOT_ONEBOUNCE, button(sulfurCubeSpawnEgg(), Minigame.ONEBOUNCE.label, NamedTextColor.GOLD,
-                plain(Minigame.ONEBOUNCE.description, NamedTextColor.GRAY),
+        inventory.setItem(SLOT_ONEBOUNCE, button(sulfurCubeSpawnEgg(), Challenge.ONEBOUNCE.label, NamedTextColor.GOLD,
+                plain(Challenge.ONEBOUNCE.description, NamedTextColor.GRAY),
                 plain("Click to select", NamedTextColor.YELLOW)));
-        inventory.setItem(SLOT_SMASH, button(sulfurWall(), Minigame.SMASH.label, NamedTextColor.GOLD,
-                plain(Minigame.SMASH.description, NamedTextColor.GRAY),
+        inventory.setItem(SLOT_SMASH, button(sulfurWall(), Challenge.SMASH.label, NamedTextColor.GOLD,
+                plain(Challenge.SMASH.description, NamedTextColor.GRAY),
                 plain("Click to select", NamedTextColor.YELLOW)));
         inventory.setItem(SLOT_BACK, backButton());
         player.openInventory(inventory);
@@ -341,7 +341,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
                         // Not allowed yet: back to the menu, with the reason in chat.
                         later(() -> {
                             openMainMenu(player);
-                            error(player, "Select a minigame first, then invite a player.");
+                            error(player, "Select a challenge first, then invite a player.");
                         });
                     } else {
                         later(() -> openInviteMenu(player, 1));
@@ -350,8 +350,8 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
             }
             case SELECT -> {
                 if (slot == SLOT_DUELS || slot == SLOT_ONEBOUNCE || slot == SLOT_SMASH) {
-                    Minigame game = slot == SLOT_DUELS ? Minigame.DUELS
-                            : slot == SLOT_ONEBOUNCE ? Minigame.ONEBOUNCE : Minigame.SMASH;
+                    Challenge game = slot == SLOT_DUELS ? Challenge.DUELS
+                            : slot == SLOT_ONEBOUNCE ? Challenge.ONEBOUNCE : Challenge.SMASH;
                     selected.put(player.getUniqueId(), game);
                     later(() -> {
                         openMainMenu(player);
@@ -397,10 +397,10 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void sendInvite(Player host, Player target) {
-        Minigame game = selected.get(host.getUniqueId());
+        Challenge game = selected.get(host.getUniqueId());
         if (game == null) {
             openMainMenu(host);
-            error(host, "Select a minigame first, then invite a player.");
+            error(host, "Select a challenge first, then invite a player.");
             return;
         }
         if (!checkFree(host)) return;
@@ -418,7 +418,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
             Invite existing = entry.getValue();
             if (existing.host().equals(host.getUniqueId()) && !expired(existing)) {
                 outstanding++;
-                if (game == Minigame.DUELS) {
+                if (game == Challenge.DUELS) {
                     // Duels: only one other player can be invited at a time.
                     Player other = Bukkit.getPlayer(entry.getKey());
                     error(host, "You have already invited " + (other == null ? "a player" : other.getName())
@@ -428,7 +428,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
                 }
             }
         }
-        if (game != Minigame.DUELS) {
+        if (game != Challenge.DUELS) {
             int joined = smashLobbies.getOrDefault(host.getUniqueId(), Set.of()).size();
             if (1 + joined + outstanding >= SmashManager.MAX_PLAYERS) {
                 error(host, game.label + " can have at most " + SmashManager.MAX_PLAYERS + " players, counting you.");
@@ -447,13 +447,13 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
                 .append(Component.text(" challenged you to " + game.label + " (" + game.description + "). ",
                         NamedTextColor.GRAY))
                 .append(Component.text("[Accept]", NamedTextColor.GREEN, TextDecoration.BOLD)
-                        .clickEvent(ClickEvent.runCommand("/minigames accept")))
+                        .clickEvent(ClickEvent.runCommand("/challenge accept")))
                 .append(Component.text(" "))
                 .append(Component.text("[Decline]", NamedTextColor.RED, TextDecoration.BOLD)
-                        .clickEvent(ClickEvent.runCommand("/minigames decline"))));
+                        .clickEvent(ClickEvent.runCommand("/challenge decline"))));
         host.sendMessage(Component.text("Invited " + target.getName() + " to " + game.label + ".", NamedTextColor.GREEN));
-        if (game != Minigame.DUELS) {
-            host.sendMessage(Component.text("Invite more players, or use /minigames start once enough have accepted.",
+        if (game != Challenge.DUELS) {
+            host.sendMessage(Component.text("Invite more players, or use /challenge start once enough have accepted.",
                     NamedTextColor.GRAY));
         }
         host.closeInventory();
@@ -462,7 +462,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
     private void accept(Player player) {
         Invite invite = invites.remove(player.getUniqueId());
         if (invite == null || expired(invite)) {
-            error(player, "You have no pending minigame invite.");
+            error(player, "You have no pending challenge invite.");
             return;
         }
         Player host = Bukkit.getPlayer(invite.host());
@@ -476,7 +476,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
 
-        if (invite.game() != Minigame.DUELS) {
+        if (invite.game() != Challenge.DUELS) {
             joinLobby(host, player, invite.game());
             return;
         }
@@ -488,7 +488,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
         }
     }
 
-    private void joinLobby(Player host, Player player, Minigame game) {
+    private void joinLobby(Player host, Player player, Challenge game) {
         Set<UUID> lobby = smashLobbies.computeIfAbsent(host.getUniqueId(), k -> new LinkedHashSet<>());
         lobby.add(player.getUniqueId());
         lobbyGames.put(host.getUniqueId(), game);
@@ -497,23 +497,23 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
                 NamedTextColor.GREEN));
         host.sendMessage(Component.text(player.getName() + " joined. " + total + " players ready. ", NamedTextColor.GREEN)
                 .append(Component.text("[Start " + game.label + "]", NamedTextColor.GOLD, TextDecoration.BOLD)
-                        .clickEvent(ClickEvent.runCommand("/minigames start"))));
+                        .clickEvent(ClickEvent.runCommand("/challenge start"))));
         if (total >= SmashManager.MAX_PLAYERS) startLobby(host);
     }
 
-    /** /minigames start: the host starts their game (Smash or One-Bounce) with everyone who has accepted so far. */
+    /** /challenge start: the host starts their game (Smash or One-Bounce) with everyone who has accepted so far. */
     private void startLobby(Player host) {
         boolean bypass = bypassing.contains(host.getUniqueId());
-        Minigame game = lobbyGames.get(host.getUniqueId());
+        Challenge game = lobbyGames.get(host.getUniqueId());
         if (game == null && bypass) game = selected.get(host.getUniqueId());
         Set<UUID> lobby = smashLobbies.get(host.getUniqueId());
         if (lobby == null && bypass) lobby = Set.of();
 
         if (game == null || lobby == null) {
-            error(host, "You haven't invited anyone. Use /minigames, select Smash or One-Bounce and invite players.");
+            error(host, "You haven't invited anyone. Use /challenge, select Smash or One-Bounce and invite players.");
             return;
         }
-        if (game == Minigame.DUELS) {
+        if (game == Challenge.DUELS) {
             error(host, "Duels needs a second player, even with bypass.");
             return;
         }
@@ -527,7 +527,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
             error(host, "Nobody has accepted yet. " + game.label + " needs at least 2 players.");
             return;
         }
-        String problem = game == Minigame.ONEBOUNCE ? oneBounce.start(players, bypass) : smash.start(players, bypass);
+        String problem = game == Challenge.ONEBOUNCE ? oneBounce.start(players, bypass) : smash.start(players, bypass);
         if (problem != null) {
             players.forEach(p -> error(p, problem));
             return;
@@ -541,7 +541,7 @@ final class MinigameManager implements CommandExecutor, TabCompleter, Listener {
     private void decline(Player player) {
         Invite invite = invites.remove(player.getUniqueId());
         if (invite == null || expired(invite)) {
-            error(player, "You have no pending minigame invite.");
+            error(player, "You have no pending challenge invite.");
             return;
         }
         player.sendMessage(Component.text("Declined the invite.", NamedTextColor.YELLOW));

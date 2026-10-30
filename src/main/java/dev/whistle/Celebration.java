@@ -23,7 +23,7 @@ import java.util.Collection;
 import java.util.List;
 import java.util.Random;
 
-/** What happens when a minigame ends: the winner gets a title and fireworks, everyone hears the level up sound. */
+/** What happens when a challenge ends: the winner gets a title and fireworks, everyone hears the level up sound. */
 final class Celebration implements Listener {
 
     private static final int FIREWORKS = 5;
@@ -54,7 +54,7 @@ final class Celebration implements Listener {
     }
 
     /**
-     * Call when a minigame is over. Everyone given plays the level up sound; the winner (may be null if there is no
+     * Call when a challenge is over. Everyone given plays the level up sound; the winner (may be null if there is no
      * winner, such as a draw) gets a "You won!" title and fireworks around them.
      */
     void finish(Collection<Player> everyone, Player winner) {
