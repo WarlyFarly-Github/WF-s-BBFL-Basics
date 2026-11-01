@@ -7,6 +7,10 @@ api-version: '26.3'
 softdepend: [TAB]
 description: Basic utilities for BBFL, including the admin Whistle and football matches.
 commands:
+  bbflbasics:
+    description: Administration for WF's BBFL Basics.
+    usage: /bbflbasics reload
+    permission: wfsbbfl.reload
   whistle:
     description: Gives you the Whistle.
     usage: /whistle
@@ -56,6 +60,9 @@ permissions:
     default: true
   wfsbbfl.bypass:
     description: Allows /match create bypass (create a match with nobody else online)
+    default: op
+  wfsbbfl.reload:
+    description: Allows /bbflbasics reload
     default: op
   wfsbbfl.match.invite.server:
     description: Allows /match invite server (invites the whole Discord server to a match)

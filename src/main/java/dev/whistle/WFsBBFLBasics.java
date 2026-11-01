@@ -45,6 +45,13 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
 
         getServer().getPluginManager().registerEvents(new VoidRescue(this), this);
 
+        PluginCommand basicsCommand = getCommand("bbflbasics");
+        if (basicsCommand != null) {
+            BasicsCommand basics = new BasicsCommand(this);
+            basicsCommand.setExecutor(basics);
+            basicsCommand.setTabCompleter(basics);
+        }
+
         StadiumManager stadiums = new StadiumManager(this);
         getServer().getPluginManager().registerEvents(stadiums, this);
         PluginCommand stadiumCommand = getCommand("stadium");
