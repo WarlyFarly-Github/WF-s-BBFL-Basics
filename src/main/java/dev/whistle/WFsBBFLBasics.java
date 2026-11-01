@@ -35,8 +35,15 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
 
     @Override
     public void onEnable() {
+        // Writes config.yml on first run and adds any missing default settings to an existing one (lobbies are kept).
+        saveDefaultConfig();
+        getConfig().options().copyDefaults(true);
+        saveConfig();
+
         whistleKey = new NamespacedKey(this, "whistle");
         getServer().getPluginManager().registerEvents(this, this);
+
+        getServer().getPluginManager().registerEvents(new VoidRescue(this), this);
 
         StadiumManager stadiums = new StadiumManager(this);
         getServer().getPluginManager().registerEvents(stadiums, this);

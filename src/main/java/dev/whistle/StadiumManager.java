@@ -24,6 +24,7 @@ import org.bukkit.plugin.java.JavaPlugin;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -37,7 +38,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
 
     private static final Pattern VALID_NAME = Pattern.compile("[A-Za-z0-9_-]{1,32}");
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "delete", "list", "info", "setcentre", "setstands", "setgoal", "goalheight", "block", "confirm", "edit", "invite", "uninvite", "claim", "bounds", "setpos1", "setpos2", "setpos3", "setpos4", "setpos5");
+            List.of("create", "delete", "list", "info", "setcentre", "setstands", "setgoal", "goalheight", "block", "confirm", "edit", "invite", "uninvite", "claim", "builder", "bounds", "setpos1", "setpos2", "setpos3", "setpos4", "setpos5");
 
     private final JavaPlugin plugin;
     private final File file;
@@ -46,6 +47,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
     /** The stadium each builder last worked on, so /stadium confirm and /stadium edit work without a name. */
     private final Map<UUID, String> lastEdited = new HashMap<>();
 
+    private static final int MAX_BUILDER_LENGTH = 64;
     private static final List<String> BOUNDS_ACTIONS = List.of("addpoint", "removepoint", "setpoint");
 
     private static final double PARTICLE_VIEW_DISTANCE = 40.0;
@@ -81,12 +83,14 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
             sender.sendMessage(Component.text("Only players can use this command.", NamedTextColor.RED));
             return true;
         }
-        if (!canBuild(player)) {
-            error(player, "You need the builder role to use /stadium.");
+        // /stadium list is open to everyone; every other subcommand needs the builder role.
+        boolean listOnly = args.length > 0 && args[0].equalsIgnoreCase("list");
+        if (!listOnly && !canBuild(player)) {
+            error(player, "You need the builder role to use /stadium (except /stadium list).");
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>");
+            error(player, "Usage: /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|builder|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>");
             return true;
         }
 
@@ -105,20 +109,24 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
             case "invite" -> invite(player, args);
             case "uninvite" -> uninvite(player, args);
             case "claim" -> claim(player, args);
+            case "builder" -> setBuilder(player, args);
             case "bounds" -> bounds(player, args);
             case "setpos1" -> setPosition(player, args, 0);
             case "setpos2" -> setPosition(player, args, 1);
             case "setpos3" -> setPosition(player, args, 2);
             case "setpos4" -> setPosition(player, args, 3);
             case "setpos5" -> setPosition(player, args, 4);
-            default -> error(player, "Unknown subcommand. Use /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>");
+            default -> error(player, "Unknown subcommand. Use /stadium <create|delete|list|info|setcentre|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|builder|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>");
         }
         return true;
     }
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
-        if (!(sender instanceof Player player) || !canBuild(player)) return List.of();
+        if (!(sender instanceof Player player)) return List.of();
+        if (!canBuild(player)) {
+            return args.length == 1 ? filter(List.of("list"), args[0]) : List.of();
+        }
 
         if (args.length == 1) {
             return filter(SUBCOMMANDS, args[0]);
@@ -159,28 +167,39 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
         if (args.length == 2 && sub.equals("claim")) {
             return filter(stadiums.values().stream().filter(s -> s.owner == null).map(s -> s.name).toList(), args[1]);
         }
-        if (args.length == 2 && List.of("delete", "info", "setcentre", "setstands", "setgoal", "goalheight", "block", "confirm", "edit",
-                "invite", "uninvite").contains(sub)) {
+        if (args.length == 2 && List.of("delete", "info", "setcentre", "setstands", "confirm", "edit").contains(sub)) {
             return filter(names(), args[1]);
         }
-        if (args.length == 3 && sub.equals("invite")) {
-            return filter(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList(), args[2]);
-        }
-        if (args.length == 3 && sub.equals("uninvite")) {
-            Stadium stadium = get(args[1]);
-            return stadium == null ? List.of() : filter(new ArrayList<>(stadium.editors.values()), args[2]);
-        }
-        if (args.length == 3 && (sub.equals("setgoal") || sub.equals("goalheight"))) {
-            return filter(List.of("red", "blue"), args[2]);
-        }
-        if (args.length == 3 && sub.equals("block")) {
-            return filter(List.of("reset"), args[2]);
-        }
-        if (args.length == 4 && sub.equals("setgoal")) {
-            return filter(List.of("pos1", "pos2", "pos3", "pos4"), args[3]);
-        }
-        if (args.length == 4 && sub.equals("goalheight")) {
-            return filter(List.of("2.5", "3", "3.5", "4", "5"), args[3]);
+
+        // These commands can leave the stadium name out, which means the stadium you are editing.
+        if (List.of("setgoal", "goalheight", "block", "builder", "invite", "uninvite").contains(sub)) {
+            Stadium named = get(args[1]);
+            int slot = named != null ? args.length - 3 : args.length - 2; // which of the command's own arguments
+            Stadium target = named != null ? named : editing(player);
+            List<String> options = new ArrayList<>();
+            if (args.length == 2) options.addAll(names());
+            if (slot < 0) slot = 0; // still typing args[1]: it may be the name or the first real argument
+            switch (sub) {
+                case "setgoal" -> {
+                    if (slot == 0) options.addAll(List.of("red", "blue"));
+                    if (slot == 1) options.addAll(List.of("pos1", "pos2", "pos3", "pos4"));
+                }
+                case "goalheight" -> {
+                    if (slot == 0) options.addAll(List.of("red", "blue"));
+                    if (slot == 1) options.addAll(List.of("2.5", "3", "3.5", "4", "5"));
+                }
+                case "block", "builder" -> {
+                    if (slot == 0) options.add("reset");
+                }
+                case "invite" -> {
+                    if (slot == 0) options.addAll(Bukkit.getOnlinePlayers().stream().map(Player::getName).toList());
+                }
+                case "uninvite" -> {
+                    if (slot == 0 && target != null) options.addAll(target.editors.values());
+                }
+                default -> { }
+            }
+            return filter(options, args[args.length - 1]);
         }
         return List.of();
     }
@@ -205,8 +224,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
         startEditing(player, created);
         save();
         player.sendMessage(Component.text("Created stadium " + name + ". Next: ", NamedTextColor.GREEN)
-                .append(Component.text("/stadium setcentre " + name + "  and  /stadium setgoal " + name
-                        + " <red|blue> <pos1|pos2|pos3|pos4>", NamedTextColor.YELLOW))
+                .append(Component.text("/stadium setcentre  and  /stadium setgoal <red|blue> <pos1|pos2|pos3|pos4>", NamedTextColor.YELLOW))
                 .append(Component.text(", plus /stadium bounds and /stadium setpos1 to setpos5 <red|blue>. Finish with /stadium confirm.",
                         NamedTextColor.GREEN)));
     }
@@ -224,18 +242,67 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
             player.sendMessage(Component.text("There are no stadiums yet. Use /stadium create <name>.", NamedTextColor.YELLOW));
             return;
         }
-        List<String> labels = stadiums.values().stream()
-                .map(s -> s.owner == null ? s.name + " (unclaimed)" : s.name).toList();
-        player.sendMessage(Component.text("Stadiums: ", NamedTextColor.GOLD)
-                .append(Component.text(String.join(", ", labels), NamedTextColor.WHITE)));
+        player.sendMessage(Component.text("Stadiums:", NamedTextColor.GOLD));
+        for (Stadium stadium : stadiums.values()) {
+            player.sendMessage(Component.text(stadium.name + " - " + builderName(stadium), NamedTextColor.WHITE));
+        }
+    }
+
+    /** The credited builder: the /stadium builder text if one was set, otherwise the owner. */
+    private String builderName(Stadium stadium) {
+        if (stadium.builder != null) return stadium.builder;
+        return stadium.owner == null ? "Unclaimed" : ownerName(stadium);
+    }
+
+    /** /stadium builder [name] [builder name...|reset]: optional credit shown in /stadium list. */
+    private void setBuilder(Player player, String[] args) {
+        // The stadium name is optional: if args[1] is a stadium it is the name, otherwise the text is for the
+        // stadium being edited (so a builder credit that happens to match a stadium name needs the name too).
+        Stadium stadium;
+        int next;
+        if (args.length >= 2 && get(args[1]) != null) {
+            stadium = get(args[1]);
+            next = 2;
+        } else {
+            stadium = editing(player);
+            next = 1;
+            if (stadium == null) {
+                error(player, "You aren't editing a stadium. Use /stadium edit <name> first, or: /stadium builder <stadium> <builder name|reset>");
+                return;
+            }
+        }
+        if (!requireEditable(player, stadium)) return;
+
+        if (args.length <= next) {
+            player.sendMessage(statusLine("Builder of " + stadium.name, builderName(stadium)
+                    + (stadium.builder == null ? " (owner, default)" : "")));
+            return;
+        }
+        String text = String.join(" ", Arrays.copyOfRange(args, next, args.length)).trim();
+        if (text.equalsIgnoreCase("reset") || text.equalsIgnoreCase("none")) {
+            stadium.builder = null;
+            save();
+            player.sendMessage(Component.text("Builder credit of " + stadium.name + " reset to the owner ("
+                    + builderName(stadium) + ").", NamedTextColor.GREEN));
+            return;
+        }
+        if (text.length() > MAX_BUILDER_LENGTH) {
+            error(player, "Builder credits can be at most " + MAX_BUILDER_LENGTH + " characters.");
+            return;
+        }
+        stadium.builder = text;
+        save();
+        player.sendMessage(Component.text("Builder of " + stadium.name + " set to " + text + ".", NamedTextColor.GREEN));
     }
 
     private void info(Player player, String[] args) {
-        Stadium stadium = requireStadium(player, args, "info");
-        if (stadium == null) return;
+        Target target = target(player, args, "info", 0);
+        if (target == null) return;
+        Stadium stadium = target.stadium();
 
         player.sendMessage(Component.text("Stadium " + stadium.name, NamedTextColor.GOLD));
         player.sendMessage(statusLine("Owner", stadium.owner == null ? "unclaimed (use /stadium claim " + stadium.name + ")" : ownerName(stadium)));
+        player.sendMessage(statusLine("Builder", builderName(stadium)));
         if (!stadium.editors.isEmpty()) {
             player.sendMessage(statusLine("Invited editors", String.join(", ", stadium.editors.values())));
         }
@@ -265,8 +332,10 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void setCenter(Player player, String[] args) {
-        Stadium stadium = requireStadium(player, args, "setcentre");
-        if (stadium == null || !requireEditable(player, stadium)) return;
+        Target target = target(player, args, "setcentre", 0);
+        if (target == null) return;
+        Stadium stadium = target.stadium();
+        if (!requireEditable(player, stadium)) return;
 
         stadium.center = player.getLocation().clone();
         save();
@@ -274,10 +343,12 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
                 + describe(stadium.center) + ". The ball is placed here during freezes.", NamedTextColor.GREEN));
     }
 
-    /** /stadium setstands <name>: where spectators who /match watch from the stands are put. */
+    /** /stadium setstands [name]: where spectators who /match watch from the stands are put. */
     private void setStands(Player player, String[] args) {
-        Stadium stadium = requireStadium(player, args, "setstands");
-        if (stadium == null || !requireEditable(player, stadium)) return;
+        Target target = target(player, args, "setstands", 0);
+        if (target == null) return;
+        Stadium stadium = target.stadium();
+        if (!requireEditable(player, stadium)) return;
 
         stadium.stands = player.getLocation().clone();
         save();
@@ -285,16 +356,27 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
                 + ". Spectators who watch from the stands are placed here.", NamedTextColor.GREEN));
     }
 
-    /** /stadium block <name> uses the block in your main hand as the stadium's icon in the chest menu. */
+    /** /stadium block [name] uses the block in your main hand as the stadium's icon in the chest menu. */
     private void setBlock(Player player, String[] args) {
-        if (args.length < 2) {
-            error(player, "Usage: /stadium block <name> [reset]  (hold the block you want in your main hand)");
+        Stadium stadium;
+        int next;
+        if (args.length >= 2 && get(args[1]) != null) {
+            stadium = get(args[1]);
+            next = 2;
+        } else if (args.length >= 2 && !args[1].equalsIgnoreCase("reset")) {
+            error(player, "No stadium called " + args[1] + ".  Usage: /stadium block [name] [reset]  (hold the block you want in your main hand)");
             return;
+        } else {
+            stadium = editing(player);
+            next = 1;
+            if (stadium == null) {
+                error(player, "You aren't editing a stadium. Use /stadium edit <name> first, or put the stadium name after /stadium block.");
+                return;
+            }
         }
-        Stadium stadium = requireStadium(player, args, "block");
-        if (stadium == null || !requireEditable(player, stadium)) return;
+        if (!requireEditable(player, stadium)) return;
 
-        if (args.length >= 3 && args[2].equalsIgnoreCase("reset")) {
+        if (args.length > next && args[next].equalsIgnoreCase("reset")) {
             stadium.block = null;
             save();
             player.sendMessage(Component.text("Menu block of " + stadium.name + " reset to the player head.",
@@ -314,24 +396,23 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void setGoal(Player player, String[] args) {
-        if (args.length < 4) {
-            error(player, "Usage: /stadium setgoal <name> <red|blue> <pos1|pos2|pos3|pos4>");
+        if (args.length < 3) {
+            error(player, "Usage: /stadium setgoal [name] <red|blue> <pos1|pos2|pos3|pos4>");
             return;
         }
-        Stadium stadium = get(args[1]);
-        if (stadium == null) {
-            error(player, "No stadium called " + args[1] + ".");
-            return;
-        }
+        Target target = target(player, args, "setgoal", 2);
+        if (target == null) return;
+        Stadium stadium = target.stadium();
+        int n = target.next();
         if (!requireEditable(player, stadium)) return;
-        Team team = parseTeam(args[2]);
+        Team team = parseTeam(args[n]);
         if (team == null) {
             error(player, "The goal must be red or blue.");
             return;
         }
         int index = -1;
         for (int i = 0; i < Stadium.GOAL_CORNERS; i++) {
-            if (args[3].equalsIgnoreCase("pos" + (i + 1))) index = i;
+            if (args[n + 1].equalsIgnoreCase("pos" + (i + 1))) index = i;
         }
         if (index < 0) {
             error(player, "The corner must be pos1, pos2, pos3 or pos4.");
@@ -352,24 +433,23 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void setGoalHeight(Player player, String[] args) {
-        if (args.length < 4) {
-            error(player, "Usage: /stadium goalheight <name> <red|blue> <blocks>  (half blocks allowed, e.g. 2.5)");
+        if (args.length < 3) {
+            error(player, "Usage: /stadium goalheight [name] <red|blue> <blocks>  (half blocks allowed, e.g. 2.5)");
             return;
         }
-        Stadium stadium = get(args[1]);
-        if (stadium == null) {
-            error(player, "No stadium called " + args[1] + ".");
-            return;
-        }
+        Target target = target(player, args, "goalheight", 2);
+        if (target == null) return;
+        Stadium stadium = target.stadium();
+        int n = target.next();
         if (!requireEditable(player, stadium)) return;
-        Team team = parseTeam(args[2]);
+        Team team = parseTeam(args[n]);
         if (team == null) {
             error(player, "The goal must be red or blue.");
             return;
         }
         double height;
         try {
-            height = Double.parseDouble(args[3]);
+            height = Double.parseDouble(args[n + 1]);
         } catch (NumberFormatException e) {
             error(player, "The height must be a number, like 3 or 2.5.");
             return;
@@ -576,18 +656,21 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
         return true;
     }
 
-    /** /stadium invite <stadium> <player>: lets another builder edit the stadium too. */
+    /** /stadium invite [stadium] <player>: lets another builder edit the stadium too. */
     private void invite(Player player, String[] args) {
-        if (args.length < 3) {
-            error(player, "Usage: /stadium invite <stadium> <player>");
+        if (args.length < 2) {
+            error(player, "Usage: /stadium invite [stadium] <player>");
             return;
         }
-        Stadium stadium = requireStadium(player, args, "invite");
-        if (stadium == null || !requireOwner(player, stadium)) return;
+        Target tgt = target(player, args, "invite", 1);
+        if (tgt == null) return;
+        Stadium stadium = tgt.stadium();
+        String who = args[tgt.next()];
+        if (!requireOwner(player, stadium)) return;
 
-        Player target = Bukkit.getPlayerExact(args[2]);
+        Player target = Bukkit.getPlayerExact(who);
         if (target == null) {
-            error(player, args[2] + " needs to be online to be invited.");
+            error(player, who + " needs to be online to be invited.");
             return;
         }
         if (target.getUniqueId().equals(stadium.owner)) {
@@ -610,21 +693,24 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
                 + ". Use /stadium edit " + stadium.name + " to start.", NamedTextColor.GREEN));
     }
 
-    /** /stadium uninvite <stadium> <player>: takes someone's editing access away again. */
+    /** /stadium uninvite [stadium] <player>: takes someone's editing access away again. */
     private void uninvite(Player player, String[] args) {
-        if (args.length < 3) {
-            error(player, "Usage: /stadium uninvite <stadium> <player>");
+        if (args.length < 2) {
+            error(player, "Usage: /stadium uninvite [stadium] <player>");
             return;
         }
-        Stadium stadium = requireStadium(player, args, "uninvite");
-        if (stadium == null || !requireOwner(player, stadium)) return;
+        Target tgt = target(player, args, "uninvite", 1);
+        if (tgt == null) return;
+        Stadium stadium = tgt.stadium();
+        String who = args[tgt.next()];
+        if (!requireOwner(player, stadium)) return;
 
         UUID found = null;
         for (Map.Entry<UUID, String> entry : stadium.editors.entrySet()) {
-            if (entry.getValue().equalsIgnoreCase(args[2])) found = entry.getKey();
+            if (entry.getValue().equalsIgnoreCase(who)) found = entry.getKey();
         }
         if (found == null) {
-            error(player, args[2] + " isn't invited to " + stadium.name + ".");
+            error(player, who + " isn't invited to " + stadium.name + ".");
             return;
         }
         String name = stadium.editors.remove(found);
@@ -929,6 +1015,37 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
         return stadium;
     }
 
+    /** The stadium this player is currently editing, or null. */
+    private Stadium editing(Player player) {
+        String last = lastEdited.get(player.getUniqueId());
+        return last == null ? null : stadiums.get(last);
+    }
+
+    /** Which stadium a command applies to, and where its own arguments start in args. */
+    private record Target(Stadium stadium, int next) { }
+
+    /**
+     * The stadium name is optional: if the command has at least {@code ownArgs} + 1 arguments, args[1] is the stadium
+     * name; otherwise the stadium the player is editing is used. Counting arguments (rather than guessing from the
+     * text) means a typo in a name is reported instead of silently editing a different stadium.
+     */
+    private Target target(Player player, String[] args, String sub, int ownArgs) {
+        if (args.length >= 2 + ownArgs) {
+            Stadium named = get(args[1]);
+            if (named == null) {
+                error(player, "No stadium called " + args[1] + ".");
+                return null;
+            }
+            return new Target(named, 2);
+        }
+        Stadium current = editing(player);
+        if (current == null) {
+            error(player, "You aren't editing a stadium. Use /stadium edit <name> first, or put the stadium name after /stadium " + sub + ".");
+            return null;
+        }
+        return new Target(current, 1);
+    }
+
     private Component statusLine(String label, String value) {
         Component line = Component.text(" - " + label + ": ", NamedTextColor.GRAY);
         return value == null
@@ -957,6 +1074,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
             yaml.set(path + ".name", stadium.name);
             yaml.set(path + ".confirmed", stadium.confirmed);
             if (stadium.owner != null) yaml.set(path + ".owner", stadium.owner.toString());
+            if (stadium.builder != null) yaml.set(path + ".builder", stadium.builder);
             for (Map.Entry<UUID, String> editor : stadium.editors.entrySet()) {
                 yaml.set(path + ".editors." + editor.getKey(), editor.getValue());
             }
@@ -1008,6 +1126,7 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
                     plugin.getLogger().warning("Bad owner id for stadium " + key + "; it can be claimed again.");
                 }
             }
+            stadium.builder = yaml.getString(path + ".builder");
             ConfigurationSection editorSection = yaml.getConfigurationSection(path + ".editors");
             if (editorSection != null) {
                 for (String id : editorSection.getKeys(false)) {

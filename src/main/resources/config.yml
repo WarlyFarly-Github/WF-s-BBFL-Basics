@@ -1,0 +1,24 @@
+# WF's BBFL Basics configuration.
+# (Lobby locations set with /setlobby are also stored in this file.)
+
+# /match invite server (operators) posts a message to one Discord channel to invite the whole Discord server.
+# It is sent through a channel webhook, so the channel is whichever channel the webhook belongs to.
+#
+# To set it up: in Discord open Channel Settings > Integrations > Webhooks > New Webhook, pick the channel you want,
+# copy the webhook URL into webhook-url below and restart the server.
+# Keep the webhook URL private: anyone who has it can post to that channel.
+server-invite:
+  webhook-url: ""
+
+  # Minimum time between invites, so the channel can't be flooded by accident.
+  cooldown-seconds: 60
+
+  # Optional: the ID of a Discord role to ping with the invite (leave empty for no ping).
+  # Enable Developer Mode in Discord, right-click the role and choose Copy Role ID.
+  mention-role-id: ""
+
+  # Shown as {ip} in the message below.
+  server-address: "bbfl.my.pebble.host"
+
+  # The message. Placeholders: {role} (the ping, if set) {player} (who sent the invite) {ip}
+  message: "{role}**{player}** is hosting a football match! Join **{ip}** to play or watch."

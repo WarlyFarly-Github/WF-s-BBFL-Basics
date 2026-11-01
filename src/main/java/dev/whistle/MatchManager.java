@@ -21,12 +21,14 @@ import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
+import org.bukkit.World;
 import org.bukkit.entity.Entity;
 import org.bukkit.entity.Player;
 import org.bukkit.entity.SulfurCube;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
 import org.bukkit.event.entity.EntityDamageByEntityEvent;
+import org.bukkit.event.world.EntitiesLoadEvent;
 import org.bukkit.event.entity.PlayerDeathEvent;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.ExplosionPrimeEvent;
@@ -110,6 +112,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final int MAX_PAGES = 64;   // the page number is the banner's stack size
 
     private final JavaPlugin plugin;
+    private final DiscordAnnouncer discord;
     private final StadiumManager stadiums;
     private final NamespacedKey ballKey;
     private final NamespacedKey targetKey;
@@ -175,6 +178,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.tabNames = new TabNameTags(plugin);
         removeScoreboardTeams(); // leftovers from a crash or a reload
         this.stadiums = stadiums;
+        this.discord = new DiscordAnnouncer(plugin);
         this.ballKey = new NamespacedKey(plugin, "football");
         this.targetKey = new NamespacedKey(plugin, "invite_target");
         this.jerseyKey = new NamespacedKey(plugin, "jersey");
@@ -182,6 +186,38 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         // Checks for the ball entering a goal area or hitting the bounds every tick (a hard kick moves ~1.5 blocks a tick).
         Bukkit.getScheduler().runTaskTimer(plugin, this::checkGoals, 1L, 1L);
+
+        // Balls are persistent, so one can outlive a crash, reload or lost game and sit around as a second, untracked
+        // ball. Nothing is running yet when the plugin starts, so every ball already loaded is a leftover.
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            for (World world : Bukkit.getWorlds()) {
+                for (SulfurCube cube : world.getEntitiesByClass(SulfurCube.class)) {
+                    if (isBall(cube) && !isTrackedBall(cube)) cube.remove();
+                }
+            }
+        });
+    }
+
+    /** True if a match, Smash or One-Bounce game is currently using this ball. */
+    private boolean isTrackedBall(Entity ball) {
+        return matchOfBall(ball) != null
+                || (smash != null && smash.ownsBall(ball))
+                || (oneBounce != null && oneBounce.ownsBall(ball));
+    }
+
+    /** Removes any of our balls near this spot that no game is using, before a fresh one is spawned there. */
+    void removeStrayBalls(Location around) {
+        for (Entity entity : around.getWorld().getNearbyEntities(around, 64, 64, 64)) {
+            if (isBall(entity) && !isTrackedBall(entity)) entity.remove();
+        }
+    }
+
+    /** Leftover balls in chunks that load later (after a restart or when someone walks near) are cleaned up too. */
+    @EventHandler
+    public void onEntitiesLoad(EntitiesLoadEvent event) {
+        for (Entity entity : event.getEntities()) {
+            if (isBall(entity) && !isTrackedBall(entity)) entity.remove();
+        }
     }
 
     /** Removes every ball on shutdown so none are left behind. */
@@ -213,8 +249,19 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         switch (args[0].toLowerCase()) {
             case "create" -> create(player, args);
             case "invite" -> {
-                Match match = hostedMatch(player);
-                if (match != null) openTeamMenu(player);
+                if (args.length >= 2 && args[1].equalsIgnoreCase("server")) {
+                    // /match invite server: invite the whole Discord server (operators only).
+                    if (!player.hasPermission("wfsbbfl.match.invite.server")) {
+                        error(player, "Only operators can invite the whole server.");
+                    } else {
+                        discord.inviteServer(player);
+                    }
+                } else if (args.length >= 2) {
+                    error(player, "Usage: /match invite" + (player.hasPermission("wfsbbfl.match.invite.server") ? " [server]" : ""));
+                } else {
+                    Match match = hostedMatch(player);
+                    if (match != null) openTeamMenu(player);
+                }
             }
             case "stadium" -> chooseStadium(player, args);
             case "start" -> start(player);
@@ -244,6 +291,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("goal")) {
             return List.of("red", "blue");
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("invite") && sender.hasPermission("wfsbbfl.match.invite.server")) {
+            return "server".startsWith(args[1].toLowerCase()) ? List.of("server") : List.of();
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("stadium")) {
             return stadiums.names().stream().filter(n -> n.toLowerCase().startsWith(args[1].toLowerCase())).toList();
@@ -1155,7 +1205,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         Match ballMatch = matchOfBall(event.getEntity());
-        if (ballMatch != null && isFrozen(ballMatch)) return; // ball is frozen during the countdown
+        if (ballMatch == null) {
+            // Not part of any match or minigame: a stray ball (it may have no gravity). Get rid of it.
+            event.getEntity().remove();
+            return;
+        }
+        if (isFrozen(ballMatch)) return; // ball is frozen during the countdown
 
         if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker) {
             if (isWatching(kicker.getUniqueId())) return; // spectators in the stands can't touch the ball

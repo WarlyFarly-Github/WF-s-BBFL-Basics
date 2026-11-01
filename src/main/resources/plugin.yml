@@ -1,6 +1,6 @@
 name: WFs_BBFL_Basics
 prefix: "WF's BBFL Basics"
-version: 1.1.0
+version: 1.2.0
 author: WarlyFarly
 main: dev.whistle.WFsBBFLBasics
 api-version: '26.3'
@@ -40,7 +40,7 @@ commands:
     permission: wfsbbfl.setprefix
   stadium:
     description: Create stadiums, set centre points and goal areas.
-    usage: /stadium <create|delete|list|info|setcentre|setstands|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>
+    usage: /stadium <create|delete|list|info|setcentre|setstands|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|builder|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>
 permissions:
   whistle.give:
     description: Allows use of /whistle
@@ -56,6 +56,9 @@ permissions:
     default: true
   wfsbbfl.bypass:
     description: Allows /match create bypass (create a match with nobody else online)
+    default: op
+  wfsbbfl.match.invite.server:
+    description: Allows /match invite server (invites the whole Discord server to a match)
     default: op
   wfsbbfl.smashstadium:
     description: Allows /smashstadium

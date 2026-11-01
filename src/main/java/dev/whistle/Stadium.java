@@ -25,6 +25,9 @@ final class Stadium {
     /** Who owns the stadium. Null for stadiums from before owners existed: those can be taken with /stadium claim. */
     UUID owner;
 
+    /** Optional builder credit shown in /stadium list. Null means the owner is credited. */
+    String builder;
+
     /** Players the owner invited to edit it too (uuid -> name when invited). */
     final Map<UUID, String> editors = new LinkedHashMap<>();
 
