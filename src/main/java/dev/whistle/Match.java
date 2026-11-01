@@ -51,6 +51,11 @@ final class Match {
     int redScore;
     int blueScore;
     boolean started;
+    /** Referees: in the match (they see its bars and blow the whistle) but on neither team. */
+    final Set<UUID> referees = new LinkedHashSet<>();
+    static final int MAX_REFEREES = 3;
+    boolean paused;                        // a referee blew the whistle: clock, ball and players are held still
+    org.bukkit.util.Vector pausedVelocity; // the ball's velocity when play was paused, given back on resume
     boolean serverInvited; // the whole Discord server was invited to this match, so Discord hears when it is over
     boolean bypass; // created with /match create bypass: may start without players on both teams
     SulfurCube ball;
@@ -137,6 +142,7 @@ final class Match {
     void remove(UUID id) {
         red.remove(id);
         blue.remove(id);
+        referees.remove(id);
     }
 
     Team teamOf(UUID id) {
@@ -156,8 +162,18 @@ final class Match {
         return players;
     }
 
+    /** The players on the two teams plus the referees: everyone who takes part in the match. */
+    List<Player> onlineAudience() {
+        List<Player> players = onlineMembers();
+        for (UUID id : referees) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) players.add(p);
+        }
+        return players;
+    }
+
     void broadcast(Component message) {
-        onlineMembers().forEach(p -> p.sendMessage(message));
+        onlineAudience().forEach(p -> p.sendMessage(message));
     }
 
     void showBar(Player player) {
@@ -173,6 +189,12 @@ final class Match {
     void addGoal(Team team) {
         if (team == Team.RED) redScore++;
         else blueScore++;
+        updateBar();
+    }
+
+    void removeGoal(Team team) {
+        if (team == Team.RED) redScore = Math.max(0, redScore - 1);
+        else blueScore = Math.max(0, blueScore - 1);
         updateBar();
     }
 

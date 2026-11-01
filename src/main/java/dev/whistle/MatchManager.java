@@ -63,6 +63,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
+import java.util.function.Supplier;
 
 /** Handles /match, the invite GUI, invites and the football itself. */
 final class MatchManager implements CommandExecutor, TabCompleter, Listener {
@@ -102,9 +103,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final int SLOT_INVITE = 12;
     private static final int SLOT_STADIUM = 14;
     private static final int SLOT_START = 16;
-    private static final int SLOT_RED_TEAM = 11;
-    private static final int SLOT_SERVER_INVITE = 13; // between the two teams
-    private static final int SLOT_BLUE_TEAM = 15;
+    // The invite menu: Red, Invite Server, Referees, Blue, evenly spaced.
+    private static final int SLOT_RED_TEAM = 10;
+    private static final int SLOT_SERVER_INVITE = 12;
+    private static final int SLOT_REFEREE = 14;
+    private static final int SLOT_BLUE_TEAM = 16;
     private static final int SLOT_PREVIOUS = 21;
     private static final int SLOT_PAGE = 22;
     private static final int SLOT_NEXT = 23;
@@ -119,6 +122,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private final NamespacedKey targetKey;
     private final NamespacedKey jerseyKey;
     private final NamespacedKey stadiumKey;
+    private final NamespacedKey refereeWhistleKey;
+    private Supplier<ItemStack> whistleSupplier; // the plugin's Whistle item, which referees are given
     private final Map<UUID, Match> matchByPlayer = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
 
@@ -156,6 +161,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.smash = smash;
     }
 
+    void setWhistle(Supplier<ItemStack> whistleSupplier) {
+        this.whistleSupplier = whistleSupplier;
+    }
+
     void setSpectators(SpectatorManager spectators) {
         this.spectators = spectators;
     }
@@ -181,6 +190,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.stadiums = stadiums;
         this.discord = new DiscordAnnouncer(plugin);
         this.ballKey = new NamespacedKey(plugin, "football");
+        this.refereeWhistleKey = new NamespacedKey(plugin, "referee_whistle");
         this.targetKey = new NamespacedKey(plugin, "invite_target");
         this.jerseyKey = new NamespacedKey(plugin, "jersey");
         this.stadiumKey = new NamespacedKey(plugin, "stadium_choice");
@@ -228,7 +238,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (oneBounce != null) oneBounce.shutdown();
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
-            m.onlineMembers().forEach(p -> restoreChestplate(m, p));
+            m.onlineAudience().forEach(p -> restoreChestplate(m, p));
             if (m.ball != null) m.ball.remove();
         });
         removeScoreboardTeams();
@@ -291,6 +301,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return spectators.completions(args);
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("goal")) {
+            return List.of("red", "blue", "remove");
+        }
+        if (args.length == 3 && args[0].equalsIgnoreCase("goal") && args[1].equalsIgnoreCase("remove")) {
             return List.of("red", "blue");
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("invite") && sender.hasPermission("wfsbbfl.match.invite.server")) {
@@ -302,7 +315,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (args.length == 2 && args[0].equalsIgnoreCase("create") && sender.hasPermission("wfsbbfl.bypass")) {
             return List.of("bypass");
         }
-        if (args.length == 3 && args[0].equalsIgnoreCase("goal")) {
+        if (args.length == 3 && args[0].equalsIgnoreCase("goal") && !args[1].equalsIgnoreCase("remove")) {
             return Bukkit.getOnlinePlayers().stream().map(Player::getName)
                     .filter(n -> n.toLowerCase().startsWith(args[2].toLowerCase())).toList();
         }
@@ -396,6 +409,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         match.started = true;
         match.ballStart = host.getLocation().clone();
         spawnBall(match, host.getLocation());
+        match.pausedVelocity = null; // a new ball: nothing to give back when play resumes
         if (isFrozen(match)) freezeBall(match);
 
         if (firstStart) {
@@ -403,6 +417,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 match.startPositions.put(p.getUniqueId(), p.getLocation().clone());
                 match.showBar(p);
                 giveJersey(match, p);
+            }
+            for (UUID refereeId : match.referees) {
+                Player referee = Bukkit.getPlayer(refereeId);
+                if (referee != null) match.showBar(referee);
             }
             match.broadcast(Component.text("The match has started!", NamedTextColor.GREEN, TextDecoration.BOLD));
             startTimer(match);
@@ -493,7 +511,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         announceToDiscord(match, true);
         cancelTasks(match);
         if (match.ball != null) match.ball.remove();
-        for (Player p : match.onlineMembers()) {
+        for (Player p : match.onlineAudience()) {
             restoreChestplate(match, p);
             match.hideBar(p);
             if (!p.getUniqueId().equals(match.host)) {
@@ -506,24 +524,64 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         invites.values().removeIf(invite -> invite.host().equals(match.host));
     }
 
-    private void goal(Player host, String[] args) {
-        Match match = hostedMatch(host);
+    /** The match this player hosts or referees, with an error message if they do neither. */
+    private Match officialMatch(Player player) {
+        Match match = matchByPlayer.get(player.getUniqueId());
+        if (match == null) {
+            error(player, "You don't have a match. Use /match create first.");
+            return null;
+        }
+        if (!player.getUniqueId().equals(match.host) && !match.referees.contains(player.getUniqueId())) {
+            error(player, "Only the match host or a referee can do that.");
+            return null;
+        }
+        return match;
+    }
+
+    /** /match goal <red|blue> [player] adds a goal; /match goal remove <red|blue> takes one away. Host and referees. */
+    private void goal(Player official, String[] args) {
+        Match match = officialMatch(official);
         if (match == null) return;
         if (!match.started) {
-            error(host, "The match hasn't started yet.");
+            error(official, "The match hasn't started yet.");
+            return;
+        }
+        boolean remove = args.length >= 2 && args[1].equalsIgnoreCase("remove");
+        int teamArg = remove ? 2 : 1;
+        if (args.length <= teamArg
+                || !(args[teamArg].equalsIgnoreCase("red") || args[teamArg].equalsIgnoreCase("blue"))) {
+            error(official, "Usage: /match goal <red|blue> [player]   or   /match goal remove <red|blue>");
+            return;
+        }
+        Team team = args[teamArg].equalsIgnoreCase("red") ? Team.RED : Team.BLUE;
+
+        if (remove) {
+            removeGoal(match, team, official);
+            return;
+        }
+        if (match.paused) {
+            error(official, "Play is paused. Resume it with the whistle first.");
             return;
         }
         if (match.phase == Match.Phase.COUNTDOWN) {
-            error(host, "You can't score during a countdown.");
+            error(official, "You can't score during a countdown.");
             return;
         }
-        if (args.length < 2 || !(args[1].equalsIgnoreCase("red") || args[1].equalsIgnoreCase("blue"))) {
-            error(host, "Usage: /match goal <red|blue> [player]");
-            return;
-        }
-        Team team = args[1].equalsIgnoreCase("red") ? Team.RED : Team.BLUE;
-        String scorer = args.length >= 3 ? args[2] : lastScorerName(match);
+        String scorer = args.length > teamArg + 1 ? args[teamArg + 1] : lastScorerName(match);
         scoreGoal(match, team, scorer);
+    }
+
+    private void removeGoal(Match match, Team team, Player official) {
+        int score = team == Team.RED ? match.redScore : match.blueScore;
+        if (score <= 0) {
+            error(official, "The " + team.label + " team has no goals to remove.");
+            return;
+        }
+        match.removeGoal(team);
+        Component message = Component.text(official.getName() + " removed a goal from the ", NamedTextColor.YELLOW)
+                .append(Component.text(team.label + " team", team.color))
+                .append(Component.text(". Score: " + match.redScore + " - " + match.blueScore, NamedTextColor.YELLOW));
+        for (Player p : everyoneIn(match)) p.sendMessage(message);
     }
 
     /** Whoever last kicked the ball, otherwise the host. */
@@ -547,7 +605,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 headline,
                 Component.text("Scored by " + scorer, NamedTextColor.WHITE),
                 Title.Times.times(Duration.ofMillis(250), Duration.ofSeconds(4), Duration.ofMillis(500)));
-        for (Player p : match.onlineMembers()) {
+        for (Player p : match.onlineAudience()) {
             p.showTitle(title);
         }
 
@@ -557,7 +615,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     /** Detects the ball entering a goal area of the match's stadium. */
     private void checkGoals() {
         for (Match match : new LinkedHashSet<>(matchByPlayer.values())) {
-            if (!match.started || match.phase == Match.Phase.COUNTDOWN || match.stadium == null) continue;
+            if (!match.started || match.phase == Match.Phase.COUNTDOWN || match.paused || match.stadium == null) continue;
             SulfurCube ball = match.ball;
             if (ball == null || !ball.isValid()) continue;
 
@@ -630,7 +688,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void announceOutOfBounds(Match match) {
-        for (Player p : match.onlineMembers()) {
+        for (Player p : match.onlineAudience()) {
             p.sendActionBar(Component.text("Out of bounds!", NamedTextColor.YELLOW, TextDecoration.BOLD));
         }
     }
@@ -724,6 +782,20 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (isWatching(player.getUniqueId())) {
             error(player, "You are watching a match. Use /match leave first, then accept the invite.");
             invites.put(player.getUniqueId(), invite); // keep the invite so they can still accept it
+            return;
+        }
+        if (invite.team() == null) { // referee
+            if (match.referees.size() >= Match.MAX_REFEREES) {
+                error(player, "This match already has " + Match.MAX_REFEREES + " referees.");
+                return;
+            }
+            match.referees.add(player.getUniqueId());
+            matchByPlayer.put(player.getUniqueId(), match);
+            giveRefereeKit(match, player);
+            match.broadcast(Component.text(player.getName(), NamedTextColor.YELLOW)
+                    .append(Component.text(" joined as a referee.", NamedTextColor.GRAY)));
+            player.sendMessage(Component.text("You are a referee. Blow your whistle to pause and resume play, and use "
+                    + "/match goal <red|blue> or /match goal remove <red|blue> to change the score.", NamedTextColor.GREEN));
             return;
         }
         if (match.isFull(invite.team())) {
@@ -839,6 +911,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     plain(match.serverInvited ? "Already sent for this match. Click to send again."
                             : "Click to send the invite.", match.serverInvited ? NamedTextColor.YELLOW : NamedTextColor.GREEN)));
         }
+        inventory.setItem(SLOT_REFEREE, button(Material.WHITE_CANDLE, "Referees", NamedTextColor.WHITE,
+                plain(match.referees.size() + "/" + Match.MAX_REFEREES + " referees", NamedTextColor.GRAY),
+                plain("Click to invite a referee.", NamedTextColor.GRAY)));
         inventory.setItem(SLOT_BLUE_TEAM, teamItem(match, Team.BLUE));
         inventory.setItem(SLOT_BACK, backButton());
         host.openInventory(inventory);
@@ -881,7 +956,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         page = Math.max(1, Math.min(page, pages));
 
         MenuGui holder = new MenuGui(type, page, pages, team);
-        String title = type == MenuType.STADIUMS ? "Choose Stadium" : "Invite to " + team.label + " Team";
+        String title = type == MenuType.STADIUMS ? "Choose Stadium" : team == null ? "Invite a Referee" : "Invite to " + team.label + " Team";
         Inventory inventory = newMenu(holder, title);
 
         for (int i = 0; i < PAGE_SIZE; i++) {
@@ -1003,6 +1078,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 switch (slot) {
                     case SLOT_RED_TEAM -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, Team.RED));
                     case SLOT_BLUE_TEAM -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, Team.BLUE));
+                    case SLOT_REFEREE -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, null)); // null team = referee
                     case SLOT_SERVER_INVITE -> {
                         if (host.hasPermission("wfsbbfl.match.invite.server")) {
                             later(() -> {
@@ -1091,6 +1167,22 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(host, target.getName() + " is already in a match.");
             return;
         }
+        if (team == null) { // a referee
+            if (match.referees.size() >= Match.MAX_REFEREES) {
+                error(host, "A match can have at most " + Match.MAX_REFEREES + " referees.");
+                return;
+            }
+            invites.put(target.getUniqueId(), new Invite(host.getUniqueId(), null, System.currentTimeMillis()));
+            target.sendMessage(Component.text(host.getName(), NamedTextColor.YELLOW)
+                    .append(Component.text(" invited you to referee a football match. ", NamedTextColor.GRAY))
+                    .append(Component.text("[Accept]", NamedTextColor.GREEN, TextDecoration.BOLD)
+                            .clickEvent(ClickEvent.runCommand("/match accept")))
+                    .append(Component.text(" "))
+                    .append(Component.text("[Decline]", NamedTextColor.RED, TextDecoration.BOLD)
+                            .clickEvent(ClickEvent.runCommand("/match decline"))));
+            host.sendMessage(Component.text("Invited " + target.getName() + " as a referee.", NamedTextColor.GREEN));
+            return;
+        }
         if (match.isFull(team)) {
             error(host, "The " + team.label + " team is full (" + Match.MAX_PER_TEAM + "/" + Match.MAX_PER_TEAM + ").");
             return;
@@ -1162,7 +1254,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private boolean isFrozen(Match match) {
-        return match.started && match.phase == Match.Phase.COUNTDOWN;
+        return match.started && (match.phase == Match.Phase.COUNTDOWN || match.paused);
     }
 
     private void freezeBall(Match match) {
@@ -1183,6 +1275,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     public void onMove(PlayerMoveEvent event) {
         Match match = matchByPlayer.get(event.getPlayer().getUniqueId());
         if (match == null || !isFrozen(match)) return;
+        if (match.referees.contains(event.getPlayer().getUniqueId())) return; // referees can walk the pitch
 
         Location from = event.getFrom();
         Location to = event.getTo();
@@ -1232,6 +1325,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker) {
             if (isWatching(kicker.getUniqueId())) return; // spectators in the stands can't touch the ball
             Match kickerMatch = matchByPlayer.get(kicker.getUniqueId());
+            if (kickerMatch != null && kickerMatch.referees.contains(kicker.getUniqueId())) return; // referees don't play
             if (kickerMatch != null) kickerMatch.lastKicker = kicker.getUniqueId();
             event.getEntity().setVelocity(kickVelocity(kicker));
         }
@@ -1259,7 +1353,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     /** Ticks once a second. Play time is paused while a countdown is running. */
     private void tickTimer(Match match) {
-        if (match.phase == Match.Phase.COUNTDOWN) return;
+        if (match.phase == Match.Phase.COUNTDOWN || match.paused) return;
 
         match.secondsLeft--;
         if (match.secondsLeft > 0) {
@@ -1378,14 +1472,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         };
         Title title = Title.title(
                 Component.text("Kick off!", NamedTextColor.GREEN, TextDecoration.BOLD), subtitle);
-        for (Player p : match.onlineMembers()) p.showTitle(title);
+        for (Player p : match.onlineAudience()) p.showTitle(title);
         playFreezeSound(match, 2.0f); // freeze ends: one octave higher
     }
 
     /** Note block "ding" (the bell). Pitch 1.0 is the normal note, 2.0 is exactly one octave up. */
     private void playFreezeSound(Match match, float pitch) {
         Sound ding = Sound.sound(Key.key("block.note_block.bell"), Sound.Source.MASTER, 1.0f, pitch);
-        for (Player p : match.onlineMembers()) p.playSound(ding);
+        for (Player p : match.onlineAudience()) p.playSound(ding);
     }
 
     private void updateTimerBar(Match match) {
@@ -1394,8 +1488,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         String half = match.duel ? "Duel" : match.quick ? "Quickmatch"
                 : match.phase == Match.Phase.FIRST_HALF ? "First Half" : "Second Half";
 
-        match.timerBar.color(BossBar.Color.YELLOW);
         match.timerBar.progress(Math.min(1.0f, seconds / (float) match.playSeconds));
+        if (match.paused) {
+            match.timerBar.color(BossBar.Color.RED);
+            match.timerBar.name(Component.text("Paused - " + time, NamedTextColor.RED, TextDecoration.BOLD));
+            return;
+        }
+        match.timerBar.color(BossBar.Color.YELLOW);
         match.timerBar.name(Component.text(half + " - " + time, NamedTextColor.YELLOW, TextDecoration.BOLD));
     }
 
@@ -1413,7 +1512,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (match.countdownType == Match.CountdownType.GOAL) {
             // The goal title is still on screen, so count down on the action bar instead.
             Component actionBar = Component.text("Play resumes in " + n, NamedTextColor.GOLD, TextDecoration.BOLD);
-            for (Player p : match.onlineMembers()) p.sendActionBar(actionBar);
+            for (Player p : match.onlineAudience()) p.sendActionBar(actionBar);
             return;
         }
 
@@ -1424,7 +1523,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 Component.text(String.valueOf(n), NamedTextColor.GOLD, TextDecoration.BOLD),
                 subtitle,
                 Title.Times.times(Duration.ZERO, Duration.ofMillis(900), Duration.ofMillis(100)));
-        for (Player p : match.onlineMembers()) p.showTitle(title);
+        for (Player p : match.onlineAudience()) p.showTitle(title);
     }
 
     private void cancelTasks(Match match) {
@@ -1468,6 +1567,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void restoreChestplate(Match match, Player player) {
+        removeRefereeWhistle(player);
         if (!match.duel) clearNameColor(player);
         GameMode savedMode = match.savedGameModes.remove(player.getUniqueId());
         if (savedMode != null) player.setGameMode(savedMode);
@@ -1581,6 +1681,97 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
     }
 
+    // ------------------------------------------------------------------ referees and the whistle
+
+    /** Everyone who should see what happens in this match: both teams, the referees and the people watching. */
+    private List<Player> everyoneIn(Match match) {
+        List<Player> everyone = new ArrayList<>(match.onlineAudience());
+        if (spectators != null) everyone.addAll(spectators.watchersOf(match));
+        return everyone;
+    }
+
+    private ItemStack createRefereeWhistle() {
+        ItemStack item = whistleSupplier == null ? new ItemStack(Material.GOAT_HORN) : whistleSupplier.get();
+        ItemMeta meta = item.getItemMeta();
+        meta.lore(List.of(plain("Referee whistle: blow it to pause and resume play.", NamedTextColor.GRAY)));
+        meta.getPersistentDataContainer().set(refereeWhistleKey, PersistentDataType.BYTE, (byte) 1);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    /** A new referee gets the whistle (and, like players, adventure mode so they can't break the stadium). */
+    private void giveRefereeKit(Match match, Player player) {
+        match.savedGameModes.putIfAbsent(player.getUniqueId(), player.getGameMode());
+        player.setGameMode(GameMode.ADVENTURE);
+        Map<Integer, ItemStack> leftover = player.getInventory().addItem(createRefereeWhistle());
+        leftover.values().forEach(item -> player.getWorld().dropItemNaturally(player.getLocation(), item));
+        if (match.started) match.showBar(player);
+    }
+
+    /** Takes back the referee whistle (only that one: an operator's own Whistle stays). */
+    private void removeRefereeWhistle(Player player) {
+        ItemStack[] contents = player.getInventory().getContents();
+        for (int slot = 0; slot < contents.length; slot++) {
+            ItemStack item = contents[slot];
+            if (item != null && item.hasItemMeta()
+                    && item.getItemMeta().getPersistentDataContainer().has(refereeWhistleKey, PersistentDataType.BYTE)) {
+                player.getInventory().setItem(slot, null);
+            }
+        }
+    }
+
+    /**
+     * Someone blew a Whistle. If they are in a match (playing, refereeing or watching) only the people in that match
+     * and its watchers get the title and sound, and a referee's whistle also pauses or resumes play. Returns false if
+     * they are not in a match, so the caller can do the normal server-wide whistle.
+     */
+    boolean blowWhistle(Player player) {
+        UUID id = player.getUniqueId();
+        Match match = matchByPlayer.get(id);
+        if (match == null && spectators != null) match = spectators.matchOf(id);
+        if (match == null) return false;
+
+        Component headline = Component.text("Whistle Blown!", NamedTextColor.YELLOW);
+        Component subtitle = Component.text("by " + player.getName());
+        if (match.referees.contains(id)) {
+            if (match.started && match.phase != Match.Phase.COUNTDOWN) {
+                boolean pausing = !match.paused;
+                setPaused(match, pausing);
+                headline = pausing ? Component.text("Play Paused", NamedTextColor.RED)
+                        : Component.text("Play Resumed", NamedTextColor.GREEN);
+                subtitle = Component.text("Whistle blown by " + player.getName());
+            } else {
+                player.sendActionBar(Component.text("Play can only be paused while the ball is in play.",
+                        NamedTextColor.RED));
+            }
+        }
+
+        Title title = Title.title(headline, subtitle);
+        Sound levelUp = Sound.sound(Key.key("entity.player.levelup"), Sound.Source.PLAYER, 1.0f, 1.0f);
+        for (Player p : everyoneIn(match)) {
+            p.showTitle(title);
+            p.playSound(levelUp);
+        }
+        return true;
+    }
+
+    /** Pauses or resumes play: the clock stops, the ball hangs where it is, and players can't move or kick. */
+    private void setPaused(Match match, boolean paused) {
+        match.paused = paused;
+        SulfurCube ball = match.ball;
+        if (ball != null) {
+            if (paused) {
+                match.pausedVelocity = ball.getVelocity().clone();
+                freezeBall(match);
+            } else {
+                ball.setGravity(true);
+                if (match.pausedVelocity != null) ball.setVelocity(match.pausedVelocity);
+                match.pausedVelocity = null;
+            }
+        }
+        updateTimerBar(match);
+    }
+
     private void removeMember(Match match, Player player) {
         restoreChestplate(match, player);
         match.remove(player.getUniqueId());
@@ -1609,7 +1800,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 .append(resultLine(match));
 
         List<Player> members = new ArrayList<>(match.onlineMembers());
-        for (Player p : members) {
+        for (Player p : match.onlineAudience()) {
             restoreChestplate(match, p);
             match.hideBar(p);
             p.sendMessage(message);

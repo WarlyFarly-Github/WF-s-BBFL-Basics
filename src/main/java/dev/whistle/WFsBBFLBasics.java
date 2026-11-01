@@ -61,6 +61,7 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
         }
 
         matches = new MatchManager(this, stadiums);
+        matches.setWhistle(this::createWhistle);
         getServer().getPluginManager().registerEvents(matches, this);
         PluginCommand matchCommand = getCommand("match");
         if (matchCommand != null) {
@@ -190,6 +191,10 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
         Long last = lastBlown.get(player.getUniqueId());
         if (last != null && now - last < 7000) return;
         lastBlown.put(player.getUniqueId(), now);
+
+        // In a match (playing, refereeing or watching) the whistle is for that match only, and referees' whistles
+        // pause and resume play. Anywhere else it is the normal server-wide whistle below.
+        if (matches != null && matches.blowWhistle(player)) return;
 
         // Equivalent of:
         //   /title @a title {color:"yellow",text:"Whistle Blown!"}

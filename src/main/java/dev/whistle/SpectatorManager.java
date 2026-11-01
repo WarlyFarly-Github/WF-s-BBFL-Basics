@@ -71,6 +71,23 @@ final class SpectatorManager implements Listener {
         return watchers.containsKey(id);
     }
 
+    /** The match this player is watching, or null. */
+    Match matchOf(UUID id) {
+        Watcher watcher = watchers.get(id);
+        return watcher == null ? null : watcher.match;
+    }
+
+    /** Everyone online who is watching this match. */
+    List<Player> watchersOf(Match match) {
+        List<Player> players = new ArrayList<>();
+        for (Map.Entry<UUID, Watcher> entry : watchers.entrySet()) {
+            if (entry.getValue().match != match) continue;
+            Player p = Bukkit.getPlayer(entry.getKey());
+            if (p != null) players.add(p);
+        }
+        return players;
+    }
+
     // ------------------------------------------------------------------ /match watch
 
     /** /match watch [stadium] [stands|pitch]  (args[0] is "watch"). */
