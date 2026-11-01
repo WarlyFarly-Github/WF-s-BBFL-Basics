@@ -54,6 +54,10 @@ final class Match {
     /** Referees: in the match (they see its bars and blow the whistle) but on neither team. */
     final Set<UUID> referees = new LinkedHashSet<>();
     static final int MAX_REFEREES = 3;
+    static final int MAX_SUBS_PER_TEAM = 3;
+    /** Substitutes: in the match and watching from the sidelines until a referee subs them on for a player. */
+    private final Set<UUID> redSubs = new LinkedHashSet<>();
+    private final Set<UUID> blueSubs = new LinkedHashSet<>();
     boolean paused;                        // a referee blew the whistle: clock, ball and players are held still
     org.bukkit.util.Vector pausedVelocity; // the ball's velocity when play was paused, given back on resume
     boolean serverInvited; // the whole Discord server was invited to this match, so Discord hears when it is over
@@ -119,6 +123,21 @@ final class Match {
         return team == Team.RED ? redName : blueName;
     }
 
+    Set<UUID> subs(Team team) {
+        return team == Team.RED ? redSubs : blueSubs;
+    }
+
+    /** The team this player is a substitute for, or null if they are not a substitute. */
+    Team subTeamOf(UUID id) {
+        if (redSubs.contains(id)) return Team.RED;
+        return blueSubs.contains(id) ? Team.BLUE : null;
+    }
+
+    /** On the sidelines: a referee or a substitute. They are in the match but not playing. */
+    boolean isSideline(UUID id) {
+        return referees.contains(id) || redSubs.contains(id) || blueSubs.contains(id);
+    }
+
     Set<UUID> teamSet(Team team) {
         return team == Team.RED ? red : blue;
     }
@@ -143,6 +162,8 @@ final class Match {
         red.remove(id);
         blue.remove(id);
         referees.remove(id);
+        redSubs.remove(id);
+        blueSubs.remove(id);
     }
 
     Team teamOf(UUID id) {
@@ -166,6 +187,14 @@ final class Match {
     List<Player> onlineAudience() {
         List<Player> players = onlineMembers();
         for (UUID id : referees) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) players.add(p);
+        }
+        for (UUID id : redSubs) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) players.add(p);
+        }
+        for (UUID id : blueSubs) {
             Player p = Bukkit.getPlayer(id);
             if (p != null) players.add(p);
         }

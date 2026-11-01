@@ -11,6 +11,7 @@ import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
+import org.bukkit.FluidCollisionMode;
 import org.bukkit.GameMode;
 import org.bukkit.DyeColor;
 import org.bukkit.Location;
@@ -54,6 +55,7 @@ import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scoreboard.Scoreboard;
 import org.bukkit.util.Vector;
+import org.bukkit.util.RayTraceResult;
 
 import java.time.Duration;
 import java.util.ArrayList;
@@ -71,11 +73,16 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final long INVITE_TIMEOUT_MS = 60_000;
     private static final int COUNTDOWN_SECONDS = 5;   // length of every freeze
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline", "watch");
+            List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline", "watch", "sub");
 
-    private record Invite(UUID host, Team team, long time) {}
+    /** team == null: a referee invite. substitute: the invite is for the team's bench rather than its main players. */
+    private record Invite(UUID host, Team team, long time, boolean substitute) {}
 
-    private enum MenuType { MAIN, TEAMS, STADIUMS, PLAYERS }
+    /**
+     * TEAMS > TEAM_ROLE (Main / Substitute) > PLAYERS (invite) or SUBS (the bench) > SUB_OUT (who comes off).
+     * SUB_TEAMS is the shortcut referees get from /match sub.
+     */
+    private enum MenuType { MAIN, TEAMS, TEAM_ROLE, SUB_TEAMS, STADIUMS, PLAYERS, SUBS, SUB_OUT }
 
     /** Marks one of our chest menus so clicks can be recognised, and remembers which one it is. */
     private static final class MenuGui implements InventoryHolder {
@@ -83,13 +90,21 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         private final int page;   // 1-based, only used by the paged menus
         private final int pages;  // total pages, only used by the paged menus
         private final Team team;  // which team the player menu invites to
+        private final boolean substitute; // PLAYERS: invite as a substitute rather than a main player
+        private final UUID incoming;      // SUB_OUT: the substitute who is coming on
         private Inventory inventory;
 
         private MenuGui(MenuType type, int page, int pages, Team team) {
+            this(type, page, pages, team, false, null);
+        }
+
+        private MenuGui(MenuType type, int page, int pages, Team team, boolean substitute, UUID incoming) {
             this.type = type;
             this.page = page;
             this.pages = pages;
             this.team = team;
+            this.substitute = substitute;
+            this.incoming = incoming;
         }
 
         @Override
@@ -108,6 +123,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final int SLOT_SERVER_INVITE = 12;
     private static final int SLOT_REFEREE = 14;
     private static final int SLOT_BLUE_TEAM = 16;
+    // Two-choice menus (Main / Substitute, and Red / Blue for referees).
+    private static final int SLOT_LEFT = 11;
+    private static final int SLOT_RIGHT = 15;
+    private static final int SLOT_INVITE_SUB = 18;
     private static final int SLOT_PREVIOUS = 21;
     private static final int SLOT_PAGE = 22;
     private static final int SLOT_NEXT = 23;
@@ -253,7 +272,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline|watch>");
+            error(player, "Usage: /match <create|invite|stadium|start|goal|sub|end|leave|accept|decline|watch>");
             return true;
         }
 
@@ -277,6 +296,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case "stadium" -> chooseStadium(player, args);
             case "start" -> start(player);
             case "goal" -> goal(player, args);
+            case "sub" -> substituteCommand(player, args);
             case "end" -> {
                 Match match = hostedMatch(player);
                 if (match != null) endMatch(match, "The match was ended by the host.");
@@ -287,7 +307,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case "leave" -> leave(player);
             case "accept" -> accept(player);
             case "decline" -> decline(player);
-            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|start|goal|end|leave|accept|decline|watch>");
+            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|start|goal|sub|end|leave|accept|decline|watch>");
         }
         return true;
     }
@@ -299,6 +319,18 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         if (args[0].equalsIgnoreCase("watch") && spectators != null) {
             return spectators.completions(args);
+        }
+        if (args[0].equalsIgnoreCase("sub") && sender instanceof Player subSender && (args.length == 2 || args.length == 3)) {
+            Match match = officialMatchQuiet(subSender);
+            if (match == null) return List.of();
+            List<String> names = new ArrayList<>();
+            for (Team team : Team.values()) {
+                for (UUID id : args.length == 2 ? match.subs(team) : match.teamSet(team)) {
+                    Player p = Bukkit.getPlayer(id);
+                    if (p != null && p.getName().toLowerCase().startsWith(args[args.length - 1].toLowerCase())) names.add(p.getName());
+                }
+            }
+            return names;
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("goal")) {
             return List.of("red", "blue", "remove");
@@ -418,9 +450,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 match.showBar(p);
                 giveJersey(match, p);
             }
-            for (UUID refereeId : match.referees) {
-                Player referee = Bukkit.getPlayer(refereeId);
-                if (referee != null) match.showBar(referee);
+            for (Player sideline : match.onlineAudience()) {
+                if (match.isSideline(sideline.getUniqueId())) match.showBar(sideline); // referees and substitutes
             }
             match.broadcast(Component.text("The match has started!", NamedTextColor.GREEN, TextDecoration.BOLD));
             startTimer(match);
@@ -567,6 +598,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(official, "You can't score during a countdown.");
             return;
         }
+        if (match.referees.contains(official.getUniqueId())) {
+            // A referee's goal says who added it (and still names the scorer if the referee gave one).
+            String subtitle = args.length > teamArg + 1
+                    ? "Scored by " + args[teamArg + 1] + " (added by " + official.getName() + ")"
+                    : "Added by " + official.getName();
+            scoreGoalWithSubtitle(match, team, subtitle);
+            return;
+        }
         String scorer = args.length > teamArg + 1 ? args[teamArg + 1] : lastScorerName(match);
         scoreGoal(match, team, scorer);
     }
@@ -594,6 +633,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     /** Adds the goal, shows the title and starts the 5 second freeze. */
     private void scoreGoal(Match match, Team team, String scorer) {
+        scoreGoalWithSubtitle(match, team, "Scored by " + scorer);
+    }
+
+    /** As scoreGoal, but with the exact text for the goal title's subtitle (referees' goals say who added them). */
+    private void scoreGoalWithSubtitle(Match match, Team team, String subtitleText) {
         if (match.phase == Match.Phase.COUNTDOWN) return;
         match.addGoal(team);
 
@@ -603,7 +647,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 : Component.text(team.label + " Goal!", team.color, TextDecoration.BOLD);
         Title title = Title.title(
                 headline,
-                Component.text("Scored by " + scorer, NamedTextColor.WHITE),
+                Component.text(subtitleText, NamedTextColor.WHITE),
                 Title.Times.times(Duration.ofMillis(250), Duration.ofSeconds(4), Duration.ofMillis(500)));
         for (Player p : match.onlineAudience()) {
             p.showTitle(title);
@@ -798,6 +842,23 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     + "/match goal <red|blue> or /match goal remove <red|blue> to change the score.", NamedTextColor.GREEN));
             return;
         }
+        if (invite.substitute()) {
+            Team team = invite.team();
+            if (match.subs(team).size() >= Match.MAX_SUBS_PER_TEAM) {
+                error(player, "The " + team.label + " team already has " + Match.MAX_SUBS_PER_TEAM + " substitutes.");
+                return;
+            }
+            match.subs(team).add(player.getUniqueId());
+            matchByPlayer.put(player.getUniqueId(), match);
+            giveSubKit(match, player);
+            match.broadcast(Component.text(player.getName(), NamedTextColor.YELLOW)
+                    .append(Component.text(" joined as a ", NamedTextColor.GRAY))
+                    .append(Component.text(team.label + " substitute", team.color))
+                    .append(Component.text(".", NamedTextColor.GRAY)));
+            player.sendMessage(Component.text("You are a " + team.label + " substitute. Wait on the side: a referee "
+                    + "will sub you on.", NamedTextColor.GREEN));
+            return;
+        }
         if (match.isFull(invite.team())) {
             error(player, "The " + invite.team().label + " team is full!");
             return;
@@ -920,8 +981,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private ItemStack teamItem(Match match, Team team) {
-        ItemStack item = button(Material.LEATHER_CHESTPLATE, team.label + " Team", team.color,
+        return teamItem(match, team, team.label + " Team", team.color,
                 plain(match.size(team) + "/" + Match.MAX_PER_TEAM + " players", NamedTextColor.GRAY));
+    }
+
+    /** A chestplate in the team's colour with a custom name and lore. */
+    private ItemStack teamItem(Match match, Team team, String name, NamedTextColor nameColor, Component... lore) {
+        ItemStack item = button(Material.LEATHER_CHESTPLATE, name, nameColor, lore);
         LeatherArmorMeta meta = (LeatherArmorMeta) item.getItemMeta();
         meta.setColor(Color.fromRGB(team.color.value()));
         meta.addItemFlags(ItemFlag.HIDE_DYE);
@@ -933,30 +999,92 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return button(Material.OAK_DOOR, "Back", NamedTextColor.DARK_BLUE);
     }
 
-    /** The stadium list (MenuType.STADIUMS) and the player list for a team (MenuType.PLAYERS) share one layout. */
-    private void openPagedMenu(Player host, MenuType type, int page, Team team) {
+    /** Team menu, step two: Main players or Substitutes for this team. */
+    private void openTeamRoleMenu(Player host, Team team) {
         Match match = menuMatch(host);
         if (match == null) return;
 
+        MenuGui holder = new MenuGui(MenuType.TEAM_ROLE, 0, 0, team);
+        Inventory inventory = newMenu(holder, team.label + " Team");
+        inventory.setItem(SLOT_LEFT, teamItem(match, team, "Main", NamedTextColor.WHITE,
+                plain(match.size(team) + "/" + Match.MAX_PER_TEAM + " players", NamedTextColor.GRAY),
+                plain("Click to invite a main player.", NamedTextColor.GRAY)));
+        // A bench: where the players waiting to be subbed on sit.
+        inventory.setItem(SLOT_RIGHT, button(Material.OAK_STAIRS, "Substitute", team.color,
+                plain(match.subs(team).size() + "/" + Match.MAX_SUBS_PER_TEAM + " substitutes", NamedTextColor.GRAY),
+                plain("Click to invite or sub on a substitute.", NamedTextColor.GRAY)));
+        inventory.setItem(SLOT_BACK, backButton());
+        host.openInventory(inventory);
+    }
+
+    /** For referees (and the host): pick the team whose substitutes to sub on. */
+    private void openSubTeamMenu(Player player) {
+        Match match = officialMatchQuiet(player);
+        if (match == null) return;
+
+        MenuGui holder = new MenuGui(MenuType.SUB_TEAMS, 0, 0, null);
+        Inventory inventory = newMenu(holder, "Substitutions");
+        inventory.setItem(SLOT_LEFT, teamItem(match, Team.RED, Team.RED.label + " Team", Team.RED.color,
+                plain(match.subs(Team.RED).size() + " substitutes", NamedTextColor.GRAY)));
+        inventory.setItem(SLOT_RIGHT, teamItem(match, Team.BLUE, Team.BLUE.label + " Team", Team.BLUE.color,
+                plain(match.subs(Team.BLUE).size() + " substitutes", NamedTextColor.GRAY)));
+        inventory.setItem(SLOT_BACK, backButton());
+        player.openInventory(inventory);
+    }
+
+    /** The stadium list, the player list for invites, a team's substitutes and the "who comes off" list share one layout. */
+    private void openPagedMenu(Player host, MenuType type, int page, Team team) {
+        openPagedMenu(host, type, page, team, false, null);
+    }
+
+    private void openPagedMenu(Player host, MenuType type, int page, Team team, boolean substitute, UUID incoming) {
+        boolean official = type == MenuType.SUBS || type == MenuType.SUB_OUT;
+        Match match = official ? officialMatchQuiet(host) : menuMatch(host);
+        if (match == null) return;
+
         List<ItemStack> entries = new ArrayList<>();
-        if (type == MenuType.STADIUMS) {
-            for (String name : stadiums.names()) {
-                Stadium stadium = stadiums.get(name);
-                if (stadium != null) entries.add(createStadiumItem(stadium));
+        switch (type) {
+            case STADIUMS -> {
+                for (String name : stadiums.names()) {
+                    Stadium stadium = stadiums.get(name);
+                    if (stadium != null) entries.add(createStadiumItem(stadium));
+                }
             }
-        } else {
-            for (Player other : Bukkit.getOnlinePlayers()) {
-                if (other.getUniqueId().equals(host.getUniqueId())) continue;
-                if (matchByPlayer.containsKey(other.getUniqueId())) continue;
-                entries.add(createHead(other));
+            case SUBS -> {
+                for (UUID id : match.subs(team)) {
+                    Player sub = Bukkit.getPlayer(id);
+                    if (sub != null) entries.add(createHead(sub, "Click to sub on"));
+                }
+            }
+            case SUB_OUT -> {
+                for (UUID id : match.teamSet(team)) {
+                    Player main = Bukkit.getPlayer(id);
+                    if (main != null) entries.add(createHead(main, "Click to take off"));
+                }
+            }
+            default -> {
+                for (Player other : Bukkit.getOnlinePlayers()) {
+                    if (other.getUniqueId().equals(host.getUniqueId())) continue;
+                    if (matchByPlayer.containsKey(other.getUniqueId())) continue;
+                    entries.add(createHead(other));
+                }
             }
         }
 
         int pages = Math.max(1, Math.min(MAX_PAGES, (entries.size() + PAGE_SIZE - 1) / PAGE_SIZE));
         page = Math.max(1, Math.min(page, pages));
 
-        MenuGui holder = new MenuGui(type, page, pages, team);
-        String title = type == MenuType.STADIUMS ? "Choose Stadium" : team == null ? "Invite a Referee" : "Invite to " + team.label + " Team";
+        MenuGui holder = new MenuGui(type, page, pages, team, substitute, incoming);
+        String title = switch (type) {
+            case STADIUMS -> "Choose Stadium";
+            case SUBS -> team.label + " Substitutes";
+            case SUB_OUT -> {
+                Player in = incoming == null ? null : Bukkit.getPlayer(incoming);
+                yield "Take off for " + (in == null ? "the substitute" : in.getName());
+            }
+            default -> team == null ? "Invite a Referee"
+                    : substitute ? "Invite a " + team.label + " Substitute" : "Invite to " + team.label + " Team";
+        };
         Inventory inventory = newMenu(holder, title);
 
         for (int i = 0; i < PAGE_SIZE; i++) {
@@ -965,6 +1093,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             inventory.setItem(i, entries.get(index));
         }
 
+        if (type == MenuType.SUBS && host.getUniqueId().equals(match.host)) {
+            inventory.setItem(SLOT_INVITE_SUB, button(Material.EMERALD, "Invite Substitute", NamedTextColor.GREEN,
+                    plain("Invite a player as a " + team.label + " substitute.", NamedTextColor.GRAY)));
+        }
         inventory.setItem(SLOT_PREVIOUS, arrowBanner("Previous Page", false));
         inventory.setItem(SLOT_PAGE, pageMarker(page, pages));
         inventory.setItem(SLOT_NEXT, arrowBanner("Next Page", true));
@@ -1022,11 +1154,15 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private ItemStack createHead(Player target) {
+        return createHead(target, "Click to invite");
+    }
+
+    private ItemStack createHead(Player target, String action) {
         ItemStack head = new ItemStack(Material.PLAYER_HEAD);
         SkullMeta meta = (SkullMeta) head.getItemMeta();
         meta.setPlayerProfile(target.getPlayerProfile());
         meta.displayName(bold(target.getName(), NamedTextColor.GOLD));
-        meta.lore(List.of(plain("Click to invite", NamedTextColor.YELLOW)));
+        meta.lore(List.of(plain(action, NamedTextColor.YELLOW)));
         meta.getPersistentDataContainer().set(targetKey, PersistentDataType.STRING,
                 target.getUniqueId().toString());
         head.setItemMeta(meta);
@@ -1047,7 +1183,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (!(event.getWhoClicked() instanceof Player host)) return;
         if (event.getCurrentItem() == null) return;
 
-        Match match = menuMatch(host);
+        boolean official = menu.type == MenuType.SUB_TEAMS || menu.type == MenuType.SUBS || menu.type == MenuType.SUB_OUT;
+        Match match = official ? officialMatchQuiet(host) : menuMatch(host);
         if (match == null) {
             later(host::closeInventory);
             return;
@@ -1076,8 +1213,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             }
             case TEAMS -> {
                 switch (slot) {
-                    case SLOT_RED_TEAM -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, Team.RED));
-                    case SLOT_BLUE_TEAM -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, Team.BLUE));
+                    case SLOT_RED_TEAM -> later(() -> openTeamRoleMenu(host, Team.RED));
+                    case SLOT_BLUE_TEAM -> later(() -> openTeamRoleMenu(host, Team.BLUE));
                     case SLOT_REFEREE -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, null)); // null team = referee
                     case SLOT_SERVER_INVITE -> {
                         if (host.hasPermission("wfsbbfl.match.invite.server")) {
@@ -1094,16 +1231,47 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     default -> { }
                 }
             }
-            case STADIUMS, PLAYERS -> {
+            case TEAM_ROLE -> {
+                switch (slot) {
+                    case SLOT_LEFT -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, menu.team, false, null)); // Main
+                    case SLOT_RIGHT -> later(() -> openPagedMenu(host, MenuType.SUBS, 1, menu.team, false, null));   // Substitute
+                    case SLOT_BACK -> later(() -> openTeamMenu(host));
+                    default -> { }
+                }
+            }
+            case SUB_TEAMS -> {
+                switch (slot) {
+                    case SLOT_LEFT -> later(() -> openPagedMenu(host, MenuType.SUBS, 1, Team.RED, false, null));
+                    case SLOT_RIGHT -> later(() -> openPagedMenu(host, MenuType.SUBS, 1, Team.BLUE, false, null));
+                    case SLOT_BACK -> later(host::closeInventory);
+                    default -> { }
+                }
+            }
+            case STADIUMS, PLAYERS, SUBS, SUB_OUT -> {
                 if (slot == SLOT_BACK) {
                     later(() -> {
-                        if (menu.type == MenuType.PLAYERS) openTeamMenu(host);
-                        else openMainMenu(host);
+                        switch (menu.type) {
+                            case PLAYERS -> {
+                                if (menu.team == null) openTeamMenu(host);
+                                else if (menu.substitute) openPagedMenu(host, MenuType.SUBS, 1, menu.team, false, null);
+                                else openTeamRoleMenu(host, menu.team);
+                            }
+                            case SUBS -> {
+                                if (host.getUniqueId().equals(match.host)) openTeamRoleMenu(host, menu.team);
+                                else openSubTeamMenu(host);
+                            }
+                            case SUB_OUT -> openPagedMenu(host, MenuType.SUBS, 1, menu.team, false, null);
+                            default -> openMainMenu(host);
+                        }
                     });
+                } else if (slot == SLOT_INVITE_SUB && menu.type == MenuType.SUBS) {
+                    if (host.getUniqueId().equals(match.host)) {
+                        later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, menu.team, true, null));
+                    }
                 } else if (slot == SLOT_PREVIOUS || slot == SLOT_NEXT) {
                     int target = menu.page + (slot == SLOT_NEXT ? 1 : -1);
                     if (target >= 1 && target <= menu.pages) {
-                        later(() -> openPagedMenu(host, menu.type, target, menu.team));
+                        later(() -> openPagedMenu(host, menu.type, target, menu.team, menu.substitute, menu.incoming));
                     }
                 } else if (slot < PAGE_SIZE) {
                     handleEntryClick(host, match, menu, event.getCurrentItem());
@@ -1134,7 +1302,16 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 error(host, "That player is no longer online.");
                 return;
             }
-            invite(host, target, menu.team);
+            if (menu.type == MenuType.SUBS) {
+                // A substitute was picked: now choose which player comes off.
+                later(() -> openPagedMenu(host, MenuType.SUB_OUT, 1, menu.team, false, target.getUniqueId()));
+            } else if (menu.type == MenuType.SUB_OUT) {
+                boolean done = substitute(host, match, menu.team, menu.incoming, target);
+                later(() -> openPagedMenu(host, MenuType.SUBS, 1, menu.team, false, null));
+                if (!done) return;
+            } else {
+                invite(host, target, menu.team, menu.substitute);
+            }
         }
     }
 
@@ -1159,7 +1336,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
     }
 
-    private void invite(Player host, Player target, Team team) {
+    private void invite(Player host, Player target, Team team, boolean substitute) {
         Match match = matchByPlayer.get(host.getUniqueId());
         if (match == null || !host.getUniqueId().equals(match.host)) return;
 
@@ -1172,7 +1349,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 error(host, "A match can have at most " + Match.MAX_REFEREES + " referees.");
                 return;
             }
-            invites.put(target.getUniqueId(), new Invite(host.getUniqueId(), null, System.currentTimeMillis()));
+            invites.put(target.getUniqueId(), new Invite(host.getUniqueId(), null, System.currentTimeMillis(), false));
             target.sendMessage(Component.text(host.getName(), NamedTextColor.YELLOW)
                     .append(Component.text(" invited you to referee a football match. ", NamedTextColor.GRAY))
                     .append(Component.text("[Accept]", NamedTextColor.GREEN, TextDecoration.BOLD)
@@ -1183,12 +1360,32 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             host.sendMessage(Component.text("Invited " + target.getName() + " as a referee.", NamedTextColor.GREEN));
             return;
         }
+        if (substitute) {
+            if (match.subs(team).size() >= Match.MAX_SUBS_PER_TEAM) {
+                error(host, "The " + team.label + " team already has " + Match.MAX_SUBS_PER_TEAM + " substitutes.");
+                return;
+            }
+            invites.put(target.getUniqueId(), new Invite(host.getUniqueId(), team, System.currentTimeMillis(), true));
+            target.sendMessage(Component.text(host.getName(), NamedTextColor.YELLOW)
+                    .append(Component.text(" invited you to be a substitute for the ", NamedTextColor.GRAY))
+                    .append(Component.text(team.label + " team", team.color))
+                    .append(Component.text(". ", NamedTextColor.GRAY))
+                    .append(Component.text("[Accept]", NamedTextColor.GREEN, TextDecoration.BOLD)
+                            .clickEvent(ClickEvent.runCommand("/match accept")))
+                    .append(Component.text(" "))
+                    .append(Component.text("[Decline]", NamedTextColor.RED, TextDecoration.BOLD)
+                            .clickEvent(ClickEvent.runCommand("/match decline"))));
+            host.sendMessage(Component.text("Invited " + target.getName() + " as a ", NamedTextColor.GREEN)
+                    .append(Component.text(team.label + " substitute", team.color))
+                    .append(Component.text(".", NamedTextColor.GREEN)));
+            return;
+        }
         if (match.isFull(team)) {
             error(host, "The " + team.label + " team is full (" + Match.MAX_PER_TEAM + "/" + Match.MAX_PER_TEAM + ").");
             return;
         }
 
-        invites.put(target.getUniqueId(), new Invite(host.getUniqueId(), team, System.currentTimeMillis()));
+        invites.put(target.getUniqueId(), new Invite(host.getUniqueId(), team, System.currentTimeMillis(), false));
 
         target.sendMessage(Component.text(host.getName(), NamedTextColor.YELLOW)
                 .append(Component.text(" invited you to the ", NamedTextColor.GRAY))
@@ -1275,7 +1472,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     public void onMove(PlayerMoveEvent event) {
         Match match = matchByPlayer.get(event.getPlayer().getUniqueId());
         if (match == null || !isFrozen(match)) return;
-        if (match.referees.contains(event.getPlayer().getUniqueId())) return; // referees can walk the pitch
+        if (match.isSideline(event.getPlayer().getUniqueId())) return; // referees and substitutes can walk around
 
         Location from = event.getFrom();
         Location to = event.getTo();
@@ -1325,7 +1522,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker) {
             if (isWatching(kicker.getUniqueId())) return; // spectators in the stands can't touch the ball
             Match kickerMatch = matchByPlayer.get(kicker.getUniqueId());
-            if (kickerMatch != null && kickerMatch.referees.contains(kicker.getUniqueId())) return; // referees don't play
+            if (kickerMatch != null && kickerMatch.isSideline(kicker.getUniqueId())) return; // referees and substitutes don't play
             if (kickerMatch != null) kickerMatch.lastKicker = kicker.getUniqueId();
             event.getEntity().setVelocity(kickVelocity(kicker));
         }
@@ -1683,6 +1880,94 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     // ------------------------------------------------------------------ referees and the whistle
 
+    /** The match this player hosts or referees, or null (no error message). */
+    private Match officialMatchQuiet(Player player) {
+        Match match = matchByPlayer.get(player.getUniqueId());
+        if (match == null) return null;
+        UUID id = player.getUniqueId();
+        return id.equals(match.host) || match.referees.contains(id) ? match : null;
+    }
+
+    /** A new substitute waits on the side in adventure mode and sees the match bars. */
+    private void giveSubKit(Match match, Player player) {
+        match.savedGameModes.putIfAbsent(player.getUniqueId(), player.getGameMode());
+        player.setGameMode(GameMode.ADVENTURE);
+        if (match.started) match.showBar(player);
+    }
+
+    /** /match sub opens the substitutions menu; /match sub <substitute> <player to take off> does it directly. */
+    private void substituteCommand(Player player, String[] args) {
+        Match match = officialMatch(player);
+        if (match == null) return;
+        if (args.length == 1) {
+            openSubTeamMenu(player);
+            return;
+        }
+        if (args.length != 3) {
+            error(player, "Usage: /match sub   or   /match sub <substitute> <player to take off>");
+            return;
+        }
+        Player in = Bukkit.getPlayerExact(args[1]);
+        Player out = Bukkit.getPlayerExact(args[2]);
+        if (in == null || out == null) {
+            error(player, "Both players need to be online.");
+            return;
+        }
+        Team team = match.subTeamOf(in.getUniqueId());
+        if (team == null) {
+            error(player, in.getName() + " isn't a substitute in this match.");
+            return;
+        }
+        substitute(player, match, team, in.getUniqueId(), out);
+    }
+
+    /** Takes {@code out} off and puts the substitute on in their place, on the spot where {@code out} was standing. */
+    private boolean substitute(Player official, Match match, Team team, UUID inId, Player out) {
+        if (!match.started) {
+            error(official, "Substitutions are only possible once the match has started.");
+            return false;
+        }
+        Player in = inId == null ? null : Bukkit.getPlayer(inId);
+        if (in == null) {
+            error(official, "That substitute is no longer online.");
+            return false;
+        }
+        if (!match.subs(team).contains(inId)) {
+            error(official, in.getName() + " isn't a " + team.label + " substitute.");
+            return false;
+        }
+        if (!match.teamSet(team).contains(out.getUniqueId())) {
+            error(official, out.getName() + " isn't playing for the " + team.label + " team.");
+            return false;
+        }
+
+        Location spot = out.getLocation();
+        match.teamSet(team).remove(out.getUniqueId());
+        match.subs(team).remove(inId);
+        match.teamSet(team).add(inId);
+        match.subs(team).add(out.getUniqueId());
+
+        // The player coming off goes back to the sidelines; the substitute gets the jersey and takes their place.
+        restoreChestplate(match, out);
+        giveSubKit(match, out);
+        giveJersey(match, in);
+        in.teleport(spot);
+        in.setVelocity(new Vector(0, 0, 0));
+        in.setFallDistance(0f);
+
+        in.showTitle(Title.title(Component.text("You're on!", NamedTextColor.GREEN),
+                Component.text("Substituted for " + out.getName())));
+        out.showTitle(Title.title(Component.text("Substituted off", NamedTextColor.YELLOW),
+                Component.text("Replaced by " + in.getName())));
+        Component message = Component.text(official.getName() + " substituted ", NamedTextColor.YELLOW)
+                .append(Component.text(out.getName(), team.color))
+                .append(Component.text(" off for ", NamedTextColor.YELLOW))
+                .append(Component.text(in.getName(), team.color))
+                .append(Component.text(".", NamedTextColor.YELLOW));
+        for (Player p : everyoneIn(match)) p.sendMessage(message);
+        return true;
+    }
+
     /** Everyone who should see what happens in this match: both teams, the referees and the people watching. */
     private List<Player> everyoneIn(Match match) {
         List<Player> everyone = new ArrayList<>(match.onlineAudience());
@@ -1755,9 +2040,29 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return true;
     }
 
+    /** Moves a player straight down onto the block below them (nothing happens if they are already standing). */
+    private void dropToGround(Player player) {
+        Location at = player.getLocation();
+        RayTraceResult hit = player.getWorld().rayTraceBlocks(at, new Vector(0, -1, 0), 320,
+                FluidCollisionMode.NEVER, true);
+        if (hit == null) return;
+        double groundY = hit.getHitPosition().getY();
+        if (at.getY() - groundY < 0.05) return;
+
+        Location target = at.clone();
+        target.setY(groundY);
+        player.teleport(target);
+        player.setVelocity(new Vector(0, 0, 0));
+        player.setFallDistance(0f);
+    }
+
     /** Pauses or resumes play: the clock stops, the ball hangs where it is, and players can't move or kick. */
     private void setPaused(Match match, boolean paused) {
         match.paused = paused;
+        if (paused) {
+            // Held in mid-air they would be kicked for flying, so everyone playing is set down on the ground first.
+            for (Player p : match.onlineMembers()) dropToGround(p);
+        }
         SulfurCube ball = match.ball;
         if (ball != null) {
             if (paused) {
