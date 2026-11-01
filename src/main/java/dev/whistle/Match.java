@@ -51,6 +51,7 @@ final class Match {
     int redScore;
     int blueScore;
     boolean started;
+    boolean serverInvited; // the whole Discord server was invited to this match, so Discord hears when it is over
     boolean bypass; // created with /match create bypass: may start without players on both teams
     SulfurCube ball;
     Stadium stadium; // optional: gives the match a centre point and goal areas

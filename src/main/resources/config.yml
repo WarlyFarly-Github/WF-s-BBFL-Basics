@@ -17,8 +17,18 @@ server-invite:
   # Enable Developer Mode in Discord, right-click the role and choose Copy Role ID.
   mention-role-id: ""
 
-  # Shown as {ip} in the message below.
+  # When a match the server was invited to ends (or is cancelled), post a follow-up in the same channel.
+  announce-match-end: true
+
+  # Shown as {ip} in the messages below.
   server-address: "bbfl.my.pebble.host"
 
   # The message. Placeholders: {role} (the ping, if set) {player} (who sent the invite) {ip}
   message: "{role}**{player}** is hosting a football match! Join **{ip}** to play or watch."
+
+  # Posted when a match you invited the server to is over.
+  # Placeholders: {player} (host) {stadium} {red} {blue} {redscore} {bluescore} {result}
+  match-ended-message: "The match on **{stadium}** is over! **{red}** {redscore} - {bluescore} **{blue}**. {result}"
+
+  # Posted when a match you invited the server to is cancelled (or ended before kick-off).
+  match-cancelled-message: "**{player}** cancelled the match on **{stadium}**. Sorry about that!"

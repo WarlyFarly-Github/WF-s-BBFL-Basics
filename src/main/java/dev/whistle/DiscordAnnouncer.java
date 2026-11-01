@@ -12,13 +12,15 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.time.Duration;
+import java.util.Map;
 import java.util.UUID;
 import java.util.logging.Level;
 
 /**
- * Invites the whole Discord server to a match: /match invite server posts a message to one Discord channel through a
- * channel webhook. Everything is configured under "server-invite" in this plugin's config.yml. This is independent of
- * BBFL-Utils: it needs no bot token and does not touch that plugin.
+ * Invites the whole Discord server to a match: /match invite server (or the button in the invite menu) posts a message
+ * to one Discord channel through a channel webhook, and when that match ends or is cancelled a follow-up is posted.
+ * Everything is configured under "server-invite" in this plugin's config.yml. This is independent of BBFL-Utils: it
+ * needs no bot token and does not touch that plugin.
  */
 final class DiscordAnnouncer {
 
@@ -32,8 +34,11 @@ final class DiscordAnnouncer {
         this.plugin = plugin;
     }
 
-    /** Posts the server invite to Discord and tells the operator how it went. */
-    void inviteServer(Player sender) {
+    /**
+     * Posts the server invite to Discord and tells the operator how it went. If the sender is hosting a match, that
+     * match is remembered as announced, so Discord is told when it ends or is cancelled.
+     */
+    void inviteServer(Player sender, Match match) {
         FileConfiguration config = plugin.getConfig();
         String webhook = config.getString(ROOT + "webhook-url", "").trim();
         if (webhook.isEmpty()) {
@@ -54,6 +59,7 @@ final class DiscordAnnouncer {
             return;
         }
         lastInvite = System.currentTimeMillis();
+        if (match != null) match.serverInvited = true;
 
         String roleId = config.getString(ROOT + "mention-role-id", "").trim();
         boolean mention = roleId.matches("\\d{5,25}");
@@ -84,13 +90,51 @@ final class DiscordAnnouncer {
             } else if (!ok) {
                 plugin.getLogger().warning("Discord rejected the server invite (HTTP " + response.statusCode() + ").");
             }
-            if (!ok) lastInvite = 0; // a failed post doesn't use up the cooldown
+            if (!ok) { // a failed post doesn't use up the cooldown, and nothing was announced
+                lastInvite = 0;
+                if (match != null) match.serverInvited = false;
+            }
             Bukkit.getScheduler().runTask(plugin, () -> {
                 Player player = Bukkit.getPlayer(senderId);
                 if (player == null) return;
                 if (ok) player.sendMessage(Component.text("The whole server was invited on Discord.", NamedTextColor.GREEN));
                 else error(player, "Discord didn't accept the invite. Check the webhook URL in config.yml (see the console).");
             });
+        });
+    }
+
+    /**
+     * Tells the Discord channel how an announced match finished. The key is "match-ended-message" or
+     * "match-cancelled-message"; the values fill the {placeholders} in that message.
+     */
+    void matchUpdate(String key, Map<String, String> values) {
+        FileConfiguration config = plugin.getConfig();
+        if (!config.getBoolean(ROOT + "announce-match-end", true)) return;
+        String webhook = config.getString(ROOT + "webhook-url", "").trim();
+        if (!webhook.startsWith("https://discord.com/api/webhooks/")
+                && !webhook.startsWith("https://discordapp.com/api/webhooks/")) return;
+        String content = config.getString(ROOT + key, "");
+        if (content.isBlank()) return;
+        for (Map.Entry<String, String> entry : values.entrySet()) {
+            content = content.replace("{" + entry.getKey() + "}", escapeMarkdown(entry.getValue()));
+        }
+        content = content.replace("{role}", "")
+                .replace("{ip}", config.getString(ROOT + "server-address", "bbfl.my.pebble.host"));
+        if (content.length() > 2000) content = content.substring(0, 2000);
+
+        String body = "{\"content\":\"" + jsonEscape(content) + "\",\"allowed_mentions\":{\"parse\":[]}}";
+        HttpRequest request = HttpRequest.newBuilder(URI.create(webhook))
+                .timeout(Duration.ofSeconds(15))
+                .header("Content-Type", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        http.sendAsync(request, HttpResponse.BodyHandlers.discarding()).whenComplete((response, failure) -> {
+            if (failure != null) {
+                plugin.getLogger().log(Level.WARNING, "Could not send the match update to Discord: "
+                        + failure.getClass().getSimpleName());
+            } else if (response.statusCode() / 100 != 2) {
+                plugin.getLogger().warning("Discord rejected the match update (HTTP " + response.statusCode() + ").");
+            }
         });
     }
 

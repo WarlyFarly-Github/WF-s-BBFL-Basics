@@ -103,6 +103,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final int SLOT_STADIUM = 14;
     private static final int SLOT_START = 16;
     private static final int SLOT_RED_TEAM = 11;
+    private static final int SLOT_SERVER_INVITE = 13; // between the two teams
     private static final int SLOT_BLUE_TEAM = 15;
     private static final int SLOT_PREVIOUS = 21;
     private static final int SLOT_PAGE = 22;
@@ -254,7 +255,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     if (!player.hasPermission("wfsbbfl.match.invite.server")) {
                         error(player, "Only operators can invite the whole server.");
                     } else {
-                        discord.inviteServer(player);
+                        discord.inviteServer(player, hostedMatchQuietly(player));
                     }
                 } else if (args.length >= 2) {
                     error(player, "Usage: /match invite" + (player.hasPermission("wfsbbfl.match.invite.server") ? " [server]" : ""));
@@ -489,6 +490,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     /** Cancels a match that hasn't started: no overview, no announcements except to anyone who had already joined. */
     private void cancelMatch(Match match) {
+        announceToDiscord(match, true);
         cancelTasks(match);
         if (match.ball != null) match.ball.remove();
         for (Player p : match.onlineMembers()) {
@@ -830,6 +832,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         MenuGui holder = new MenuGui(MenuType.TEAMS, 0, 0, null);
         Inventory inventory = newMenu(holder, "Choose Team");
         inventory.setItem(SLOT_RED_TEAM, teamItem(match, Team.RED));
+        if (host.hasPermission("wfsbbfl.match.invite.server")) {
+            // A goat horn: the call that gets everyone's attention.
+            inventory.setItem(SLOT_SERVER_INVITE, button(Material.GOAT_HORN, "Invite Server", NamedTextColor.AQUA,
+                    plain("Invites the whole Discord server to this match.", NamedTextColor.GRAY),
+                    plain(match.serverInvited ? "Already sent for this match. Click to send again."
+                            : "Click to send the invite.", match.serverInvited ? NamedTextColor.YELLOW : NamedTextColor.GREEN)));
+        }
         inventory.setItem(SLOT_BLUE_TEAM, teamItem(match, Team.BLUE));
         inventory.setItem(SLOT_BACK, backButton());
         host.openInventory(inventory);
@@ -994,6 +1003,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 switch (slot) {
                     case SLOT_RED_TEAM -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, Team.RED));
                     case SLOT_BLUE_TEAM -> later(() -> openPagedMenu(host, MenuType.PLAYERS, 1, Team.BLUE));
+                    case SLOT_SERVER_INVITE -> {
+                        if (host.hasPermission("wfsbbfl.match.invite.server")) {
+                            later(() -> {
+                                discord.inviteServer(host, match);
+                                openTeamMenu(host); // refreshes the "already sent" line
+                            });
+                        }
+                    }
                     case SLOT_BACK -> later(() -> {
                         if (match.started) host.closeInventory();
                         else openMainMenu(host);
@@ -1572,6 +1589,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void endMatch(Match match, String reason) {
+        announceToDiscord(match, !match.started); // ended before kick-off counts as cancelled
         cancelTasks(match);
         if (match.ball != null) match.ball.remove();
         Component message = Component.text(reason, NamedTextColor.YELLOW);
@@ -1613,6 +1631,39 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         invites.values().removeIf(invite -> invite.host().equals(match.host));
         if (spectators != null) spectators.matchEnded(match);
+    }
+
+    /** The match's host, if this is a match its player hosts (no error message when they don't). */
+    private Match hostedMatchQuietly(Player player) {
+        Match match = matchByPlayer.get(player.getUniqueId());
+        return match != null && player.getUniqueId().equals(match.host) ? match : null;
+    }
+
+    /** If the whole Discord server was invited to this match, tells Discord that it is over (or was cancelled). */
+    private void announceToDiscord(Match match, boolean cancelled) {
+        if (!match.serverInvited) return;
+        match.serverInvited = false; // only once, however many ways there are to end a match
+        String red = match.duel ? match.duelName(Team.RED) : "Red Team";
+        String blue = match.duel ? match.duelName(Team.BLUE) : "Blue Team";
+        String host = match.host == null ? null : Bukkit.getOfflinePlayer(match.host).getName();
+
+        String result;
+        int diff = Math.abs(match.redScore - match.blueScore);
+        if (diff == 0) {
+            result = "The match ended in a draw!";
+        } else {
+            String winner = match.redScore > match.blueScore ? red : blue;
+            result = winner + " has won by " + diff + (diff == 1 ? " goal!" : " goals!");
+        }
+
+        discord.matchUpdate(cancelled ? "match-cancelled-message" : "match-ended-message", Map.of(
+                "player", host == null ? "The host" : host,
+                "stadium", match.stadium == null ? "the stadium" : match.stadium.name,
+                "red", red,
+                "blue", blue,
+                "redscore", String.valueOf(match.redScore),
+                "bluescore", String.valueOf(match.blueScore),
+                "result", result));
     }
 
     private Component resultLine(Match match) {
