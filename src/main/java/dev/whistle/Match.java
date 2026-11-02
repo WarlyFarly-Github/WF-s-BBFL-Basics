@@ -55,6 +55,25 @@ final class Match {
     final Set<UUID> referees = new LinkedHashSet<>();
     static final int MAX_REFEREES = 3;
     static final int MAX_SUBS_PER_TEAM = 3;
+    /** A spot left empty when a player disconnected mid-match, to be filled by a substitute (where they stood). */
+    record Vacancy(Team team, String name, org.bukkit.Location spot, UUID sentOffId) { } // sentOffId: a red card, else null
+    /** Players sent off with a red card: in the match, up in the stands, and not substitutes (so they can't be subbed back on). */
+    final Map<UUID, Team> sentOff = new java.util.LinkedHashMap<>();
+    /** Sent-off players who come back at half time (red card in the first half with nobody to sub on). */
+    final Set<UUID> returnAtHalfTime = new LinkedHashSet<>();
+    final Map<UUID, Integer> yellows = new HashMap<>(); // yellow cards shown to each player; two make a red
+    String pauseReason; // why play pauses once the current countdown ends (a red card or a disconnect)
+    final java.util.List<Vacancy> vacancies = new java.util.ArrayList<>();
+    /** Where referees and substitutes were when they joined, so they go back there from the stands. */
+    final Map<UUID, org.bukkit.Location> sidelineOrigins = new HashMap<>();
+    boolean pauseAfterCountdown; // someone disconnected during a countdown: pause as soon as it ends
+
+    Vacancy vacancyFor(Team team) {
+        for (Vacancy vacancy : vacancies) {
+            if (vacancy.team() == team) return vacancy;
+        }
+        return null;
+    }
     /** Substitutes: in the match and watching from the sidelines until a referee subs them on for a player. */
     private final Set<UUID> redSubs = new LinkedHashSet<>();
     private final Set<UUID> blueSubs = new LinkedHashSet<>();
@@ -135,7 +154,7 @@ final class Match {
 
     /** On the sidelines: a referee or a substitute. They are in the match but not playing. */
     boolean isSideline(UUID id) {
-        return referees.contains(id) || redSubs.contains(id) || blueSubs.contains(id);
+        return referees.contains(id) || redSubs.contains(id) || blueSubs.contains(id) || sentOff.containsKey(id);
     }
 
     Set<UUID> teamSet(Team team) {
@@ -164,6 +183,9 @@ final class Match {
         referees.remove(id);
         redSubs.remove(id);
         blueSubs.remove(id);
+        sentOff.remove(id);
+        returnAtHalfTime.remove(id);
+        yellows.remove(id);
     }
 
     Team teamOf(UUID id) {
@@ -195,6 +217,10 @@ final class Match {
             if (p != null) players.add(p);
         }
         for (UUID id : blueSubs) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) players.add(p);
+        }
+        for (UUID id : sentOff.keySet()) {
             Player p = Bukkit.getPlayer(id);
             if (p != null) players.add(p);
         }

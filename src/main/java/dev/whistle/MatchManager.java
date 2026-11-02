@@ -37,7 +37,10 @@ import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryCloseEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.inventory.InventoryType;
+import org.bukkit.event.block.Action;
 import org.bukkit.event.player.PlayerInteractEntityEvent;
+import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerRespawnEvent;
@@ -73,7 +76,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final long INVITE_TIMEOUT_MS = 60_000;
     private static final int COUNTDOWN_SECONDS = 5;   // length of every freeze
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline", "watch", "sub");
+            List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline", "watch", "sub", "cards");
 
     /** team == null: a referee invite. substitute: the invite is for the team's bench rather than its main players. */
     private record Invite(UUID host, Team team, long time, boolean substitute) {}
@@ -82,7 +85,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
      * TEAMS > TEAM_ROLE (Main / Substitute) > PLAYERS (invite) or SUBS (the bench) > SUB_OUT (who comes off).
      * SUB_TEAMS is the shortcut referees get from /match sub.
      */
-    private enum MenuType { MAIN, TEAMS, TEAM_ROLE, SUB_TEAMS, STADIUMS, PLAYERS, SUBS, SUB_OUT }
+    private enum MenuType { MAIN, TEAMS, TEAM_ROLE, SUB_TEAMS, STADIUMS, PLAYERS, SUBS, SUB_OUT, CARDS }
+
+    /** The cards a referee can show. Two yellows are a red. */
+    private enum Card { YELLOW, RED }
 
     /** Marks one of our chest menus so clicks can be recognised, and remembers which one it is. */
     private static final class MenuGui implements InventoryHolder {
@@ -92,6 +98,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         private final Team team;  // which team the player menu invites to
         private final boolean substitute; // PLAYERS: invite as a substitute rather than a main player
         private final UUID incoming;      // SUB_OUT: the substitute who is coming on
+        private final Card card;          // CARDS: which card is being shown
         private Inventory inventory;
 
         private MenuGui(MenuType type, int page, int pages, Team team) {
@@ -99,6 +106,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         private MenuGui(MenuType type, int page, int pages, Team team, boolean substitute, UUID incoming) {
+            this(type, page, pages, team, substitute, incoming, null);
+        }
+
+        private MenuGui(MenuType type, int page, int pages, Team team, boolean substitute, UUID incoming, Card card) {
+            this.card = card;
             this.type = type;
             this.page = page;
             this.pages = pages;
@@ -127,6 +139,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final int SLOT_LEFT = 11;
     private static final int SLOT_RIGHT = 15;
     private static final int SLOT_INVITE_SUB = 18;
+    private static final int SLOT_CARD_RED_ROW = 0;   // cards menu: Red team's heads start here (5 slots)
+    private static final int SLOT_CARD_BLUE_ROW = 18; // and Blue team's here
     private static final int SLOT_PREVIOUS = 21;
     private static final int SLOT_PAGE = 22;
     private static final int SLOT_NEXT = 23;
@@ -142,6 +156,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private final NamespacedKey jerseyKey;
     private final NamespacedKey stadiumKey;
     private final NamespacedKey refereeWhistleKey;
+    private final NamespacedKey cardKey;
     private Supplier<ItemStack> whistleSupplier; // the plugin's Whistle item, which referees are given
     private final Map<UUID, Match> matchByPlayer = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
@@ -210,6 +225,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.discord = new DiscordAnnouncer(plugin);
         this.ballKey = new NamespacedKey(plugin, "football");
         this.refereeWhistleKey = new NamespacedKey(plugin, "referee_whistle");
+        this.cardKey = new NamespacedKey(plugin, "referee_card");
         this.targetKey = new NamespacedKey(plugin, "invite_target");
         this.jerseyKey = new NamespacedKey(plugin, "jersey");
         this.stadiumKey = new NamespacedKey(plugin, "stadium_choice");
@@ -272,7 +288,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /match <create|invite|stadium|start|goal|sub|end|leave|accept|decline|watch>");
+            error(player, "Usage: /match <create|invite|stadium|start|goal|sub|cards|end|leave|accept|decline|watch>");
             return true;
         }
 
@@ -297,6 +313,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case "start" -> start(player);
             case "goal" -> goal(player, args);
             case "sub" -> substituteCommand(player, args);
+            case "cards" -> cardsCommand(player);
             case "end" -> {
                 Match match = hostedMatch(player);
                 if (match != null) endMatch(match, "The match was ended by the host.");
@@ -307,7 +324,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case "leave" -> leave(player);
             case "accept" -> accept(player);
             case "decline" -> decline(player);
-            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|start|goal|sub|end|leave|accept|decline|watch>");
+            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|start|goal|sub|cards|end|leave|accept|decline|watch>");
         }
         return true;
     }
@@ -451,7 +468,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 giveJersey(match, p);
             }
             for (Player sideline : match.onlineAudience()) {
-                if (match.isSideline(sideline.getUniqueId())) match.showBar(sideline); // referees and substitutes
+                if (!match.isSideline(sideline.getUniqueId())) continue; // referees and substitutes
+                match.showBar(sideline);
+                if (spectators != null) spectators.addSideline(sideline, match); // the stadium is known now
             }
             match.broadcast(Component.text("The match has started!", NamedTextColor.GREEN, TextDecoration.BOLD));
             startTimer(match);
@@ -544,6 +563,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (match.ball != null) match.ball.remove();
         for (Player p : match.onlineAudience()) {
             restoreChestplate(match, p);
+            leaveStands(p, true);
             match.hideBar(p);
             if (!p.getUniqueId().equals(match.host)) {
                 p.sendMessage(Component.text("The host cancelled the match.", NamedTextColor.YELLOW));
@@ -797,6 +817,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         removeMember(match, player);
         player.sendMessage(Component.text("You left the match.", NamedTextColor.YELLOW));
         match.broadcast(Component.text(player.getName() + " left the match.", NamedTextColor.YELLOW));
+        afterMemberLeft(match);
         endQuickMatchIfEmpty(match);
     }
 
@@ -1053,7 +1074,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case SUBS -> {
                 for (UUID id : match.subs(team)) {
                     Player sub = Bukkit.getPlayer(id);
-                    if (sub != null) entries.add(createHead(sub, "Click to sub on"));
+                    if (sub == null) continue;
+                    Match.Vacancy empty = match.vacancyFor(team);
+                    entries.add(createHead(sub, empty == null ? "Click to sub on"
+                            : "Click to take " + empty.name() + "'s place"));
                 }
             }
             case SUB_OUT -> {
@@ -1183,7 +1207,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (!(event.getWhoClicked() instanceof Player host)) return;
         if (event.getCurrentItem() == null) return;
 
-        boolean official = menu.type == MenuType.SUB_TEAMS || menu.type == MenuType.SUBS || menu.type == MenuType.SUB_OUT;
+        boolean official = menu.type == MenuType.SUB_TEAMS || menu.type == MenuType.SUBS || menu.type == MenuType.SUB_OUT
+                || menu.type == MenuType.CARDS;
         Match match = official ? officialMatchQuiet(host) : menuMatch(host);
         if (match == null) {
             later(host::closeInventory);
@@ -1230,6 +1255,22 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     });
                     default -> { }
                 }
+            }
+            case CARDS -> {
+                if (slot == SLOT_BACK) {
+                    later(host::closeInventory);
+                    return;
+                }
+                ItemStack clicked = event.getCurrentItem();
+                if (!clicked.hasItemMeta()) return;
+                String id = clicked.getItemMeta().getPersistentDataContainer().get(targetKey, PersistentDataType.STRING);
+                if (id == null) return;
+                Player target = Bukkit.getPlayer(UUID.fromString(id));
+                later(() -> {
+                    host.closeInventory();
+                    if (target == null) error(host, "That player is no longer online.");
+                    else giveCard(host, match, target, menu.card);
+                });
             }
             case TEAM_ROLE -> {
                 switch (slot) {
@@ -1303,8 +1344,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 return;
             }
             if (menu.type == MenuType.SUBS) {
-                // A substitute was picked: now choose which player comes off.
-                later(() -> openPagedMenu(host, MenuType.SUB_OUT, 1, menu.team, false, target.getUniqueId()));
+                if (match.vacancyFor(menu.team) != null) {
+                    // A player disconnected: the substitute simply takes their place.
+                    fillVacancy(host, match, menu.team, target.getUniqueId());
+                    later(() -> openPagedMenu(host, MenuType.SUBS, 1, menu.team, false, null));
+                } else {
+                    // A substitute was picked: now choose which player comes off.
+                    later(() -> openPagedMenu(host, MenuType.SUB_OUT, 1, menu.team, false, target.getUniqueId()));
+                }
             } else if (menu.type == MenuType.SUB_OUT) {
                 boolean done = substitute(host, match, menu.team, menu.incoming, target);
                 later(() -> openPagedMenu(host, MenuType.SUBS, 1, menu.team, false, null));
@@ -1577,6 +1624,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         match.resumePhase = resumePhase;
         match.countdownLeft = COUNTDOWN_SECONDS;
 
+        if (type == Match.CountdownType.HALF_TIME) returnSentOffPlayers(match);
+
         // Every freeze (start, goal, half time): players go to their team's stadium positions, the ball to the centre.
         resetPositions(match);
         freezeBall(match);
@@ -1671,6 +1720,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 Component.text("Kick off!", NamedTextColor.GREEN, TextDecoration.BOLD), subtitle);
         for (Player p : match.onlineAudience()) p.showTitle(title);
         playFreezeSound(match, 2.0f); // freeze ends: one octave higher
+
+        if (match.pauseAfterCountdown) { // someone disconnected during the countdown
+            match.pauseAfterCountdown = false;
+            setPaused(match, true);
+            announcePause(match, match.pauseReason == null ? "Play is paused" : match.pauseReason);
+            match.pauseReason = null;
+        }
     }
 
     /** Note block "ding" (the bell). Pitch 1.0 is the normal note, 2.0 is exactly one octave up. */
@@ -1872,10 +1928,345 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (player.getUniqueId().equals(match.host)) {
             endMatch(match, player.getName() + " (the host) left, so the match was ended.");
         } else {
+            // Someone who was on the pitch in a match with referees: play pauses until the referees sub someone on.
+            Team playing = match.teamSet(Team.RED).contains(player.getUniqueId()) ? Team.RED
+                    : match.teamSet(Team.BLUE).contains(player.getUniqueId()) ? Team.BLUE : null;
+            boolean pauseForThem = playing != null && match.started && !match.referees.isEmpty();
+            Location spot = player.getLocation().clone();
+
             removeMember(match, player);
-            match.broadcast(Component.text(player.getName() + " left the match.", NamedTextColor.YELLOW));
+            if (!pauseForThem) match.broadcast(Component.text(player.getName() + " left the match.", NamedTextColor.YELLOW));
+            afterMemberLeft(match);
+            if (pauseForThem) playerDisconnected(match, playing, player.getName(), spot);
             endQuickMatchIfEmpty(match);
         }
+    }
+
+    // ------------------------------------------------------------------ yellow and red cards
+
+    private ItemStack createCardItem(Card card) {
+        boolean yellow = card == Card.YELLOW;
+        ItemStack item = new ItemStack(yellow ? Material.YELLOW_BANNER : Material.RED_BANNER);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(bold(yellow ? "Yellow Card" : "Red Card", yellow ? NamedTextColor.YELLOW : NamedTextColor.RED));
+        meta.lore(List.of(plain("Right-click to show this card to a player.", NamedTextColor.GRAY)));
+        meta.getPersistentDataContainer().set(cardKey, PersistentDataType.STRING, card.name());
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private boolean hasCardItem(Player player, Card card) {
+        for (ItemStack item : player.getInventory().getContents()) {
+            if (item == null || !item.hasItemMeta()) continue;
+            if (card.name().equals(item.getItemMeta().getPersistentDataContainer().get(cardKey, PersistentDataType.STRING))) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** /match cards: a referee who lost their cards gets them back. */
+    private void cardsCommand(Player player) {
+        Match match = matchByPlayer.get(player.getUniqueId());
+        if (match == null || !match.referees.contains(player.getUniqueId())) {
+            error(player, "Only referees have cards.");
+            return;
+        }
+        for (Card card : Card.values()) {
+            if (!hasCardItem(player, card)) player.getInventory().addItem(createCardItem(card));
+        }
+        player.sendMessage(Component.text("You have your yellow and red cards.", NamedTextColor.GREEN));
+    }
+
+    /** Right-clicking a card opens the cards menu for it (the banner is never placed). */
+    @EventHandler
+    public void onCardUse(PlayerInteractEvent event) {
+        if (event.getHand() != EquipmentSlot.HAND) return;
+        if (event.getAction() != Action.RIGHT_CLICK_AIR && event.getAction() != Action.RIGHT_CLICK_BLOCK) return;
+        ItemStack item = event.getItem();
+        if (item == null || !item.hasItemMeta()) return;
+        String card = item.getItemMeta().getPersistentDataContainer().get(cardKey, PersistentDataType.STRING);
+        if (card == null) return;
+
+        event.setCancelled(true);
+        Player player = event.getPlayer();
+        Match match = matchByPlayer.get(player.getUniqueId());
+        if (match == null || !match.referees.contains(player.getUniqueId())) {
+            error(player, "Only a referee of a match can show cards.");
+            return;
+        }
+        openCardsMenu(player, Card.valueOf(card));
+    }
+
+    /** Heads of everyone on the pitch, Red team on the top row and Blue team on the bottom row. */
+    private void openCardsMenu(Player referee, Card card) {
+        Match match = officialMatchQuiet(referee);
+        if (match == null) return;
+        if (!match.started) {
+            error(referee, "Cards can only be shown once the match has started.");
+            return;
+        }
+
+        boolean yellow = card == Card.YELLOW;
+        MenuGui holder = new MenuGui(MenuType.CARDS, 0, 0, null, false, null, card);
+        Inventory inventory = newMenu(holder, yellow ? "Show a Yellow Card" : "Show a Red Card");
+        int redSlot = SLOT_CARD_RED_ROW;
+        int blueSlot = SLOT_CARD_BLUE_ROW;
+        for (Team team : Team.values()) {
+            for (UUID id : match.teamSet(team)) {
+                Player player = Bukkit.getPlayer(id);
+                if (player == null) continue;
+                ItemStack head = createHead(player, yellow ? "Click to show a yellow card" : "Click to show a red card");
+                SkullMeta meta = (SkullMeta) head.getItemMeta();
+                meta.lore(List.of(plain(team.label + " team", team.color),
+                        plain("Yellow cards: " + match.yellows.getOrDefault(id, 0), NamedTextColor.GRAY),
+                        plain(yellow ? "Click to show a yellow card" : "Click to show a red card", NamedTextColor.YELLOW)));
+                head.setItemMeta(meta);
+                inventory.setItem(team == Team.RED ? redSlot++ : blueSlot++, head);
+            }
+        }
+        inventory.setItem(13, createCardItem(card));
+        inventory.setItem(7, teamItem(match, Team.RED, "Red Team", Team.RED.color));
+        inventory.setItem(25, teamItem(match, Team.BLUE, "Blue Team", Team.BLUE.color));
+        inventory.setItem(SLOT_BACK, backButton());
+        referee.openInventory(inventory);
+    }
+
+    /** The team a player is playing for on the pitch, or null (referees, substitutes and sent-off players aren't). */
+    private Team pitchTeamOf(Match match, UUID id) {
+        if (match.teamSet(Team.RED).contains(id)) return Team.RED;
+        return match.teamSet(Team.BLUE).contains(id) ? Team.BLUE : null;
+    }
+
+    private void giveCard(Player referee, Match match, Player target, Card card) {
+        if (!match.started) {
+            error(referee, "Cards can only be shown once the match has started.");
+            return;
+        }
+        Team team = pitchTeamOf(match, target.getUniqueId());
+        if (team == null) {
+            error(referee, target.getName() + " isn't on the pitch.");
+            return;
+        }
+        if (card == Card.YELLOW) yellowCard(referee, match, target, team);
+        else redCard(referee, match, target, team, false);
+    }
+
+    private void showCardTitle(Match match, Title title, String soundKey) {
+        Sound sound = Sound.sound(Key.key(soundKey), Sound.Source.PLAYER, 1.0f, 1.0f);
+        for (Player p : everyoneIn(match)) {
+            p.showTitle(title);
+            p.playSound(sound);
+        }
+    }
+
+    private void yellowCard(Player referee, Match match, Player target, Team team) {
+        int count = match.yellows.merge(target.getUniqueId(), 1, Integer::sum);
+        if (count >= 2) { // a second yellow is a red
+            match.broadcast(Component.text("Second yellow card for " + target.getName() + "! That is a red card.",
+                    NamedTextColor.RED, TextDecoration.BOLD));
+            redCard(referee, match, target, team, true);
+            return;
+        }
+        showCardTitle(match, Title.title(Component.text("Yellow Card", NamedTextColor.YELLOW),
+                Component.text(target.getName() + " (" + team.label + " team)")), "block.note_block.pling");
+        match.broadcast(Component.text(referee.getName() + " showed a yellow card to ", NamedTextColor.YELLOW)
+                .append(Component.text(target.getName(), team.color))
+                .append(Component.text(". (1/2)", NamedTextColor.YELLOW)));
+        target.sendMessage(Component.text("One more yellow card and you are sent off.", NamedTextColor.YELLOW));
+    }
+
+    /**
+     * A player is sent off to the stands. If their team has a substitute, play pauses and the referee has to sub
+     * someone on (the substitution menu opens). If nobody can be subbed on the game goes on a player short: in the
+     * first half until half time, in the second half for the rest of the match.
+     */
+    private void redCard(Player referee, Match match, Player target, Team team, boolean secondYellow) {
+        UUID id = target.getUniqueId();
+        Location spot = target.getLocation().clone();
+        boolean replace = hasAvailableSub(match, team);
+
+        match.teamSet(team).remove(id);
+        match.sentOff.put(id, team);
+        restoreChestplate(match, target);
+        giveSubKit(match, target); // up to the stands. They aren't a substitute, so they can't be subbed back on
+
+        showCardTitle(match, Title.title(Component.text("Red Card", NamedTextColor.RED),
+                Component.text(target.getName() + " (" + team.label + " team)"
+                        + (secondYellow ? " - second yellow" : ""))), "entity.wither.hurt");
+        match.broadcast(Component.text(referee.getName() + " sent off ", NamedTextColor.RED)
+                .append(Component.text(target.getName(), team.color))
+                .append(Component.text(secondYellow ? " for a second yellow card." : " with a red card.", NamedTextColor.RED)));
+
+        if (replace) {
+            match.vacancies.add(new Match.Vacancy(team, target.getName(), spot, id));
+            if (!match.paused) {
+                if (match.phase == Match.Phase.COUNTDOWN) {
+                    match.pauseAfterCountdown = true;
+                    match.pauseReason = target.getName() + " was sent off";
+                } else {
+                    setPaused(match, true);
+                    announcePause(match, target.getName() + " was sent off");
+                }
+            }
+            later(() -> openPagedMenu(referee, MenuType.SUBS, 1, team, false, null)); // sub on a new player
+        } else if (isFirstHalf(match)) {
+            match.returnAtHalfTime.add(id);
+            match.broadcast(Component.text("Nobody can be subbed on, so the " + team.label + " team plays a player short "
+                    + "until half time.", NamedTextColor.YELLOW));
+        } else {
+            match.broadcast(Component.text("Nobody can be subbed on, so the " + team.label + " team plays a player short "
+                    + "for the rest of the match.", NamedTextColor.YELLOW));
+        }
+    }
+
+    private boolean isFirstHalf(Match match) {
+        if (match.quick) return false; // one period: a sending off lasts the whole match
+        Match.Phase phase = match.phase == Match.Phase.COUNTDOWN ? match.resumePhase : match.phase;
+        return phase == Match.Phase.FIRST_HALF;
+    }
+
+    /** At half time, players sent off in the first half with nobody to replace them come back on. */
+    private void returnSentOffPlayers(Match match) {
+        for (UUID id : new ArrayList<>(match.returnAtHalfTime)) {
+            match.returnAtHalfTime.remove(id);
+            Team team = match.sentOff.get(id);
+            Player player = Bukkit.getPlayer(id);
+            if (team == null || player == null) continue;
+            match.sentOff.remove(id);
+            if (match.isFull(team)) {
+                match.sentOff.put(id, team); // someone took their place in the meantime: they stay off
+                player.sendMessage(Component.text("The " + team.label + " team is full, so you stay off.", NamedTextColor.YELLOW));
+                continue;
+            }
+            leaveStands(player, false);
+            match.teamSet(team).add(id);
+            giveJersey(match, player);
+            player.sendMessage(Component.text("Your sending off is over: you are back on for the second half.",
+                    NamedTextColor.GREEN));
+        }
+    }
+
+    // ------------------------------------------------------------------ disconnects
+
+    private boolean hasAvailableSub(Match match, Team team) {
+        for (UUID id : match.subs(team)) {
+            if (Bukkit.getPlayer(id) != null) return true;
+        }
+        return false;
+    }
+
+    private void notifyReferees(Match match, Component message) {
+        for (UUID id : match.referees) {
+            Player referee = Bukkit.getPlayer(id);
+            if (referee != null) referee.sendMessage(message);
+        }
+    }
+
+    /**
+     * A player on the pitch disconnected. Play pauses. If their team has a substitute, the referees have to sub
+     * someone on for them before they can resume; if nobody is left to sub, they can resume straight away.
+     */
+    private void playerDisconnected(Match match, Team team, String name, Location spot) {
+        boolean canReplace = hasAvailableSub(match, team);
+        if (canReplace) match.vacancies.add(new Match.Vacancy(team, name, spot, null));
+
+        if (!match.paused) {
+            if (match.phase == Match.Phase.COUNTDOWN) {
+                match.pauseAfterCountdown = true; // the countdown can't be paused: do it as soon as it ends
+                match.pauseReason = name + " disconnected";
+            } else {
+                setPaused(match, true);
+                announcePause(match, name + " disconnected");
+            }
+        }
+        sendDisconnectInstructions(match, name, canReplace);
+    }
+
+    private void announcePause(Match match, String reason) {
+        Title title = Title.title(Component.text("Play Paused", NamedTextColor.RED), Component.text(reason));
+        Sound levelUp = Sound.sound(Key.key("entity.player.levelup"), Sound.Source.PLAYER, 1.0f, 1.0f);
+        for (Player p : everyoneIn(match)) {
+            p.showTitle(title);
+            p.playSound(levelUp);
+        }
+    }
+
+    private void sendDisconnectInstructions(Match match, String name, boolean canReplace) {
+        match.broadcast(Component.text(name + " disconnected, so play is paused.", NamedTextColor.YELLOW));
+        if (canReplace) {
+            notifyReferees(match, Component.text("Sub someone on for " + name + " before play can resume. ",
+                            NamedTextColor.YELLOW)
+                    .append(Component.text("[Open substitutions]", NamedTextColor.GREEN, TextDecoration.BOLD)
+                            .clickEvent(ClickEvent.runCommand("/match sub"))));
+        } else {
+            notifyReferees(match, Component.text("There is nobody to sub on for " + name
+                    + ". Blow your whistle to resume play when you are ready.", NamedTextColor.YELLOW));
+        }
+    }
+
+    /** After anyone leaves a started match: nobody left to referee, or nobody left to fill a spot, frees the pause. */
+    private void afterMemberLeft(Match match) {
+        if (!match.started) return;
+        if (match.paused && match.referees.isEmpty()) {
+            // Nobody could ever resume it, so the last referee leaving does.
+            match.vacancies.clear();
+            match.pauseAfterCountdown = false;
+            setPaused(match, false);
+            match.broadcast(Component.text("There are no referees left, so play resumed.", NamedTextColor.YELLOW));
+            return;
+        }
+        if (match.vacancies.isEmpty()) return;
+        boolean changed = false;
+        for (java.util.Iterator<Match.Vacancy> it = match.vacancies.iterator(); it.hasNext(); ) {
+            Match.Vacancy vacancy = it.next();
+            if (hasAvailableSub(match, vacancy.team())) continue;
+            it.remove();
+            changed = true;
+            // A red card with nobody left to sub on: they sit out until half time (or the rest of the match).
+            if (vacancy.sentOffId() != null && isFirstHalf(match)) match.returnAtHalfTime.add(vacancy.sentOffId());
+        }
+        if (changed && match.vacancies.isEmpty() && match.paused) {
+            notifyReferees(match, Component.text("There is nobody left to sub on, so you can resume play with your "
+                    + "whistle.", NamedTextColor.YELLOW));
+        }
+    }
+
+    /** Puts a substitute on in the place of a player who disconnected, where that player was standing. */
+    private boolean fillVacancy(Player official, Match match, Team team, UUID inId) {
+        Match.Vacancy vacancy = match.vacancyFor(team);
+        Player in = inId == null ? null : Bukkit.getPlayer(inId);
+        if (vacancy == null) {
+            error(official, "The " + team.label + " team has no empty spot.");
+            return false;
+        }
+        if (in == null || !match.subs(team).contains(inId)) {
+            error(official, "That substitute isn't available.");
+            return false;
+        }
+
+        match.vacancies.remove(vacancy);
+        match.subs(team).remove(inId);
+        match.teamSet(team).add(inId);
+        leaveStands(in, false);
+        giveJersey(match, in);
+        in.teleport(vacancy.spot());
+        in.setVelocity(new Vector(0, 0, 0));
+        in.setFallDistance(0f);
+        if (match.paused) dropToGround(in);
+
+        in.showTitle(Title.title(Component.text("You're on!", NamedTextColor.GREEN),
+                Component.text("Taking " + vacancy.name() + "'s place")));
+        Component message = Component.text(official.getName() + " subbed ", NamedTextColor.YELLOW)
+                .append(Component.text(in.getName(), team.color))
+                .append(Component.text(" on for " + vacancy.name() + (vacancy.sentOffId() == null
+                        ? ", who disconnected." : ", who was sent off."), NamedTextColor.YELLOW));
+        for (Player p : everyoneIn(match)) p.sendMessage(message);
+        if (match.vacancies.isEmpty()) {
+            notifyReferees(match, Component.text("Every empty spot is filled. Blow your whistle to resume play.",
+                    NamedTextColor.GREEN));
+        }
+        return true;
     }
 
     // ------------------------------------------------------------------ referees and the whistle
@@ -1893,6 +2284,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         match.savedGameModes.putIfAbsent(player.getUniqueId(), player.getGameMode());
         player.setGameMode(GameMode.ADVENTURE);
         if (match.started) match.showBar(player);
+        if (spectators != null) spectators.addSideline(player, match); // to the stands, like a watcher
+    }
+
+    /** Takes a referee or substitute out of the stands (sent home if they are leaving, not if they are going on). */
+    private void leaveStands(Player player, boolean home) {
+        if (spectators != null) spectators.removeSideline(player, home);
     }
 
     /** /match sub opens the substitutions menu; /match sub <substitute> <player to take off> does it directly. */
@@ -1900,7 +2297,19 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         Match match = officialMatch(player);
         if (match == null) return;
         if (args.length == 1) {
-            openSubTeamMenu(player);
+            // The Substitution GUI. With an empty spot waiting it opens straight onto that team's substitutes.
+            if (match.vacancies.isEmpty()) openSubTeamMenu(player);
+            else openPagedMenu(player, MenuType.SUBS, 1, match.vacancies.get(0).team(), false, null);
+            return;
+        }
+        if (args.length == 2) { // /match sub <substitute>: fills the spot of a player who disconnected
+            Player in = Bukkit.getPlayerExact(args[1]);
+            Team team = in == null ? null : match.subTeamOf(in.getUniqueId());
+            if (team == null) {
+                error(player, args[1] + " isn't a substitute in this match.");
+            } else {
+                fillVacancy(player, match, team, in.getUniqueId());
+            }
             return;
         }
         if (args.length != 3) {
@@ -1927,6 +2336,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(official, "Substitutions are only possible once the match has started.");
             return false;
         }
+        if (match.vacancyFor(team) != null) {
+            error(official, "A player disconnected: sub someone on for " + match.vacancyFor(team).name()
+                    + " first (/match sub <substitute>).");
+            return false;
+        }
         Player in = inId == null ? null : Bukkit.getPlayer(inId);
         if (in == null) {
             error(official, "That substitute is no longer online.");
@@ -1949,7 +2363,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         // The player coming off goes back to the sidelines; the substitute gets the jersey and takes their place.
         restoreChestplate(match, out);
-        giveSubKit(match, out);
+        leaveStands(in, false); // off the stands and onto the pitch
+        giveSubKit(match, out); // and the player coming off goes up to the stands
         giveJersey(match, in);
         in.teleport(spot);
         in.setVelocity(new Vector(0, 0, 0));
@@ -1988,9 +2403,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private void giveRefereeKit(Match match, Player player) {
         match.savedGameModes.putIfAbsent(player.getUniqueId(), player.getGameMode());
         player.setGameMode(GameMode.ADVENTURE);
-        Map<Integer, ItemStack> leftover = player.getInventory().addItem(createRefereeWhistle());
+        Map<Integer, ItemStack> leftover = player.getInventory().addItem(createRefereeWhistle(),
+                createCardItem(Card.YELLOW), createCardItem(Card.RED));
         leftover.values().forEach(item -> player.getWorld().dropItemNaturally(player.getLocation(), item));
         if (match.started) match.showBar(player);
+        if (spectators != null) spectators.addSideline(player, match); // to the stands, like a watcher
     }
 
     /** Takes back the referee whistle (only that one: an operator's own Whistle stays). */
@@ -1998,9 +2415,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         ItemStack[] contents = player.getInventory().getContents();
         for (int slot = 0; slot < contents.length; slot++) {
             ItemStack item = contents[slot];
-            if (item != null && item.hasItemMeta()
-                    && item.getItemMeta().getPersistentDataContainer().has(refereeWhistleKey, PersistentDataType.BYTE)) {
-                player.getInventory().setItem(slot, null);
+            if (item == null || !item.hasItemMeta()) continue;
+            var data = item.getItemMeta().getPersistentDataContainer();
+            if (data.has(refereeWhistleKey, PersistentDataType.BYTE) || data.has(cardKey, PersistentDataType.STRING)) {
+                player.getInventory().setItem(slot, null); // the referee whistle and the cards go with the job
             }
         }
     }
@@ -2019,7 +2437,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         Component headline = Component.text("Whistle Blown!", NamedTextColor.YELLOW);
         Component subtitle = Component.text("by " + player.getName());
         if (match.referees.contains(id)) {
-            if (match.started && match.phase != Match.Phase.COUNTDOWN) {
+            if (match.paused && !match.vacancies.isEmpty()) {
+                player.sendActionBar(Component.text("Sub someone on for " + match.vacancies.get(0).name()
+                        + " before resuming play.", NamedTextColor.RED));
+            } else if (match.started && match.phase != Match.Phase.COUNTDOWN) {
                 boolean pausing = !match.paused;
                 setPaused(match, pausing);
                 headline = pausing ? Component.text("Play Paused", NamedTextColor.RED)
@@ -2079,6 +2500,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private void removeMember(Match match, Player player) {
         restoreChestplate(match, player);
+        leaveStands(player, true);
         match.remove(player.getUniqueId());
         matchByPlayer.remove(player.getUniqueId());
         match.hideBar(player);
@@ -2107,6 +2529,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         List<Player> members = new ArrayList<>(match.onlineMembers());
         for (Player p : match.onlineAudience()) {
             restoreChestplate(match, p);
+            leaveStands(p, true);
             match.hideBar(p);
             p.sendMessage(message);
             p.sendMessage(overview);

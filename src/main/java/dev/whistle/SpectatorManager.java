@@ -48,13 +48,19 @@ final class SpectatorManager implements Listener {
         private final Match match;
         private final GameMode savedMode; // from before they started watching
         private final Location origin;   // where they were before they started watching
+        private final boolean sideline;  // a referee or substitute: in the match, but kept in the stands like a watcher
         private Mode mode;
 
         private Watcher(Match match, GameMode savedMode, Location origin, Mode mode) {
+            this(match, savedMode, origin, mode, false);
+        }
+
+        private Watcher(Match match, GameMode savedMode, Location origin, Mode mode, boolean sideline) {
             this.match = match;
             this.savedMode = savedMode;
             this.origin = origin;
             this.mode = mode;
+            this.sideline = sideline;
         }
     }
 
@@ -68,7 +74,32 @@ final class SpectatorManager implements Listener {
     }
 
     boolean isWatching(UUID id) {
-        return watchers.containsKey(id);
+        Watcher watcher = watchers.get(id);
+        return watcher != null && !watcher.sideline; // referees and substitutes are in the match, not watching it
+    }
+
+    // ------------------------------------------------------------------ referees and substitutes
+
+    /**
+     * Sends a referee or substitute to the stands and keeps them there like a watcher (they can't walk onto the
+     * pitch). They stay members of the match: leaving, ending and game modes are handled by MatchManager.
+     */
+    void addSideline(Player player, Match match) {
+        if (match.stadium == null || watchers.containsKey(player.getUniqueId())) return;
+        match.sidelineOrigins.computeIfAbsent(player.getUniqueId(), id -> player.getLocation().clone());
+        Watcher watcher = new Watcher(match, null, match.sidelineOrigins.get(player.getUniqueId()), Mode.STANDS, true);
+        watchers.put(player.getUniqueId(), watcher);
+        if (match.stadium.hasStands()) player.teleport(match.stadium.stands);
+    }
+
+    /** Takes a referee or substitute out of the stands, back to where they came from if {@code home}. */
+    void removeSideline(Player player, boolean home) {
+        Watcher watcher = watchers.get(player.getUniqueId());
+        if (watcher == null || !watcher.sideline) return;
+        watchers.remove(player.getUniqueId());
+        if (!home) return; // being subbed on: the caller puts them on the pitch
+        Location origin = watcher.match.sidelineOrigins.remove(player.getUniqueId());
+        if (origin != null) player.teleport(origin);
     }
 
     /** The match this player is watching, or null. */
@@ -81,7 +112,7 @@ final class SpectatorManager implements Listener {
     List<Player> watchersOf(Match match) {
         List<Player> players = new ArrayList<>();
         for (Map.Entry<UUID, Watcher> entry : watchers.entrySet()) {
-            if (entry.getValue().match != match) continue;
+            if (entry.getValue().match != match || entry.getValue().sideline) continue; // sidelines are in the match already
             Player p = Bukkit.getPlayer(entry.getKey());
             if (p != null) players.add(p);
         }
@@ -199,8 +230,9 @@ final class SpectatorManager implements Listener {
 
     /** Stops watching: back to the old game mode and place. Returns false if the player wasn't watching. */
     boolean stop(Player player, boolean announce) {
-        Watcher watcher = watchers.remove(player.getUniqueId());
-        if (watcher == null) return false;
+        Watcher watcher = watchers.get(player.getUniqueId());
+        if (watcher == null || watcher.sideline) return false; // referees and substitutes leave through /match leave
+        watchers.remove(player.getUniqueId());
         watcher.match.hideBar(player);
         player.setGameMode(watcher.savedMode);
         player.teleport(watcher.origin);
@@ -212,7 +244,7 @@ final class SpectatorManager implements Listener {
     void matchEnded(Match match) {
         for (UUID id : new ArrayList<>(watchers.keySet())) {
             Watcher watcher = watchers.get(id);
-            if (watcher == null || watcher.match != match) continue;
+            if (watcher == null || watcher.match != match || watcher.sideline) continue; // MatchManager sends sidelines home
             Player player = Bukkit.getPlayer(id);
             if (player != null && stop(player, false)) {
                 player.sendMessage(Component.text("The match you were watching has ended.", NamedTextColor.YELLOW,
@@ -226,7 +258,10 @@ final class SpectatorManager implements Listener {
     void shutdown() {
         for (UUID id : new ArrayList<>(watchers.keySet())) {
             Player player = Bukkit.getPlayer(id);
-            if (player != null) stop(player, false);
+            if (player == null) continue;
+            Watcher watcher = watchers.get(id);
+            if (watcher != null && watcher.sideline) removeSideline(player, true);
+            else stop(player, false);
         }
         watchers.clear();
     }
