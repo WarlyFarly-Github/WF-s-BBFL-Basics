@@ -28,12 +28,16 @@ commands:
     usage: /smashstadium <create|delete|list|info|edit|confirm|bounds|wallpoint1|wallpoint2|wallheight|wallfront>
     permission: wfsbbfl.smashstadium
   challenge:
-    description: Open the challenge menu (Duels, Smash, One-Bounce).
+    description: Open the challenge menu (Duels, Smash, One-Bounce, Color Cover).
     usage: /challenge [accept|decline|start|bypass]
   obstadium:
     description: Create and edit One-Bounce stadiums (operators only).
     usage: /obstadium <create|delete|list|info|setballpos|setradius|bounds|edit|confirm>
     permission: wfsbbfl.obstadium
+  ccstadium:
+    description: Create and edit Color Cover arenas (operators only).
+    usage: /ccstadium <create|delete|list|info|setspawn|bounds|edit|confirm>
+    permission: wfsbbfl.ccstadium
   setlobby:
     description: Set a lobby location (operators only).
     usage: /setlobby quickmatch
@@ -72,6 +76,9 @@ permissions:
     default: op
   wfsbbfl.obstadium:
     description: Allows /obstadium
+    default: op
+  wfsbbfl.ccstadium:
+    description: Allows /ccstadium
     default: op
   wfsbbfl.challengebypass:
     description: Allows /challenge bypass

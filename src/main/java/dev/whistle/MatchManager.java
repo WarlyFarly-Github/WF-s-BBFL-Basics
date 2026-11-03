@@ -74,7 +74,14 @@ import java.util.function.Supplier;
 final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private static final long INVITE_TIMEOUT_MS = 60_000;
-    private static final int COUNTDOWN_SECONDS = 5;   // length of every freeze
+    private static final int COUNTDOWN_SECONDS = 5;   // length of every freeze (start and after a goal)
+    // Limits for the timings menu (Match Setup > clock).
+    private static final int MIN_MATCH_MINUTES = 2;        // total match length: 2, 4, 6 ... minutes (split into two halves)
+    private static final int MAX_MATCH_MINUTES = 90;
+    private static final int MATCH_STEP_MINUTES = 2;
+    private static final int MIN_HALF_TIME_SECONDS = 30;   // half time: 30 seconds, 1 minute, 1:30 ...
+    private static final int MAX_HALF_TIME_SECONDS = 600;
+    private static final int HALF_TIME_STEP_SECONDS = 30;
     private static final List<String> SUBCOMMANDS =
             List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline", "watch", "sub", "cards");
 
@@ -85,7 +92,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
      * TEAMS > TEAM_ROLE (Main / Substitute) > PLAYERS (invite) or SUBS (the bench) > SUB_OUT (who comes off).
      * SUB_TEAMS is the shortcut referees get from /match sub.
      */
-    private enum MenuType { MAIN, TEAMS, TEAM_ROLE, SUB_TEAMS, STADIUMS, PLAYERS, SUBS, SUB_OUT, CARDS }
+    private enum MenuType { MAIN, TIMINGS, TEAMS, TEAM_ROLE, SUB_TEAMS, STADIUMS, PLAYERS, SUBS, SUB_OUT, CARDS }
 
     /** The cards a referee can show. Two yellows are a red. */
     private enum Card { YELLOW, RED }
@@ -126,10 +133,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     // Slot layout (all menus are 3 rows).
-    private static final int SLOT_CANCEL = 10;
-    private static final int SLOT_INVITE = 12;
-    private static final int SLOT_STADIUM = 14;
-    private static final int SLOT_START = 16;
+    // Match Setup: Cancel, Invite, Timings (the clock, in the middle), Stadium, Start - every other slot of the middle row.
+    private static final int SLOT_CANCEL = 9;
+    private static final int SLOT_INVITE = 11;
+    private static final int SLOT_TIMINGS = 13;
+    private static final int SLOT_STADIUM = 15;
+    private static final int SLOT_START = 17;
     // The invite menu: Red, Invite Server, Referees, Blue, evenly spaced.
     private static final int SLOT_RED_TEAM = 10;
     private static final int SLOT_SERVER_INVITE = 12;
@@ -184,6 +193,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     void setOneBounce(OneBounceManager oneBounce) {
         this.oneBounce = oneBounce;
+    }
+
+    private ColorCoverManager colorCover;
+
+    void setColorCover(ColorCoverManager colorCover) {
+        this.colorCover = colorCover;
     }
     private Celebration celebration;
 
@@ -244,11 +259,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         });
     }
 
-    /** True if a match, Smash or One-Bounce game is currently using this ball. */
+    /** True if a match, Smash, One-Bounce or Color Cover game is currently using this ball. */
     private boolean isTrackedBall(Entity ball) {
         return matchOfBall(ball) != null
                 || (smash != null && smash.ownsBall(ball))
-                || (oneBounce != null && oneBounce.ownsBall(ball));
+                || (oneBounce != null && oneBounce.ownsBall(ball))
+                || (colorCover != null && colorCover.ownsBall(ball));
     }
 
     /** Removes any of our balls near this spot that no game is using, before a fresh one is spawned there. */
@@ -271,6 +287,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (spectators != null) spectators.shutdown();
         if (smash != null) smash.shutdown();
         if (oneBounce != null) oneBounce.shutdown();
+        if (colorCover != null) colorCover.shutdown();
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
             m.onlineAudience().forEach(p -> restoreChestplate(m, p));
@@ -342,7 +359,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             if (match == null) return List.of();
             List<String> names = new ArrayList<>();
             for (Team team : Team.values()) {
-                for (UUID id : args.length == 2 ? match.subs(team) : match.teamSet(team)) {
+                List<UUID> ids = new ArrayList<>(args.length == 2 ? match.subs(team) : match.teamSet(team));
+                if (args.length == 2) {
+                    match.sentOff.forEach((offId, offTeam) -> { if (offTeam == team) ids.add(offId); });
+                }
+                for (UUID id : ids) {
                     Player p = Bukkit.getPlayer(id);
                     if (p != null && p.getName().toLowerCase().startsWith(args[args.length - 1].toLowerCase())) names.add(p.getName());
                 }
@@ -394,7 +415,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
         if (isWatching(host.getUniqueId()) || (smash != null && smash.isPlaying(host.getUniqueId()))
-                || (oneBounce != null && oneBounce.isPlaying(host.getUniqueId()))) {
+                || (oneBounce != null && oneBounce.isPlaying(host.getUniqueId()))
+                || (colorCover != null && colorCover.isPlaying(host.getUniqueId()))) {
             error(host, "You are watching or playing something. Use /match leave first.");
             return;
         }
@@ -483,7 +505,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     /** Playing in a football match or in a Smash game. */
     boolean isInMatch(UUID id) {
         return matchByPlayer.containsKey(id) || (smash != null && smash.isPlaying(id))
-                || (oneBounce != null && oneBounce.isPlaying(id));
+                || (oneBounce != null && oneBounce.isPlaying(id))
+                || (colorCover != null && colorCover.isPlaying(id));
     }
 
     /** True if a running match is being played on this stadium. */
@@ -805,6 +828,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (spectators != null && spectators.stop(player, true)) return; // watching a match
         if (smash != null && smash.leave(player)) return; // playing Smash
         if (oneBounce != null && oneBounce.leave(player)) return; // playing One-Bounce
+        if (colorCover != null && colorCover.leave(player)) return; // playing Color Cover
         Match match = matchByPlayer.get(player.getUniqueId());
         if (match == null) {
             error(player, "You are not in a match.");
@@ -959,7 +983,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return match;
     }
 
-    /** First menu of /match create: cancel, invite, change stadium, start. */
+    /** First menu of /match create: cancel, invite, timings, change stadium, start. */
     private void openMainMenu(Player host) {
         Match match = menuMatch(host);
         if (match == null) return;
@@ -972,10 +996,52 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         inventory.setItem(SLOT_INVITE, button(Material.DIAMOND, "Invite Players", NamedTextColor.BLUE,
                 plain("Red: " + match.size(Team.RED) + "/" + Match.MAX_PER_TEAM
                         + "   Blue: " + match.size(Team.BLUE) + "/" + Match.MAX_PER_TEAM, NamedTextColor.GRAY)));
+        inventory.setItem(SLOT_TIMINGS, button(Material.CLOCK, "Match Timings", NamedTextColor.GOLD,
+                plain("Match length: " + describeSeconds(match.playSeconds * 2), NamedTextColor.GRAY),
+                plain("Half time: " + describeSeconds(match.halfTimeSeconds), NamedTextColor.GRAY),
+                plain("Click to change the timings.", NamedTextColor.YELLOW)));
         inventory.setItem(SLOT_STADIUM, button(Material.BIRCH_LOG, "Change Stadium", NamedTextColor.BLUE,
                 plain("Current: " + (match.stadium == null ? "none chosen" : match.stadium.name), NamedTextColor.GRAY)));
         inventory.setItem(SLOT_START, button(Material.LIME_CONCRETE, "Start Match", NamedTextColor.GREEN));
         host.openInventory(inventory);
+    }
+
+    /** "30 seconds", "1 minute", "1 minute 30 seconds", "10 minutes". */
+    private static String describeSeconds(int seconds) {
+        int minutes = seconds / 60;
+        int rest = seconds % 60;
+        String result = minutes == 0 ? "" : minutes + (minutes == 1 ? " minute" : " minutes");
+        if (rest != 0) result += (result.isEmpty() ? "" : " ") + rest + (rest == 1 ? " second" : " seconds");
+        return result;
+    }
+
+    /** Timings menu: total match length (the two halves share it) and the half-time break. */
+    private void openTimingsMenu(Player host) {
+        Match match = menuMatch(host);
+        if (match == null) return;
+
+        MenuGui holder = new MenuGui(MenuType.TIMINGS, 0, 0, null);
+        Inventory inventory = newMenu(holder, "Match Timings");
+        inventory.setItem(SLOT_LEFT, matchLengthItem(match));
+        inventory.setItem(SLOT_RIGHT, halfTimeItem(match));
+        inventory.setItem(SLOT_BACK, backButton());
+        host.openInventory(inventory);
+    }
+
+    private ItemStack matchLengthItem(Match match) {
+        return button(Material.CLOCK, "Total Match Length", NamedTextColor.GOLD,
+                plain("Match length: " + describeSeconds(match.playSeconds * 2), NamedTextColor.YELLOW),
+                plain("Each half: " + describeSeconds(match.playSeconds), NamedTextColor.GRAY),
+                plain("Left click: +" + MATCH_STEP_MINUTES + " minutes", NamedTextColor.GREEN),
+                plain("Right click: -" + MATCH_STEP_MINUTES + " minutes", NamedTextColor.RED));
+    }
+
+    private ItemStack halfTimeItem(Match match) {
+        return button(Material.GRAY_CUSHION, "Half Time Length", NamedTextColor.GOLD,
+                plain("Half time: " + describeSeconds(match.halfTimeSeconds), NamedTextColor.YELLOW),
+                plain("Players can move freely until the last 5 seconds.", NamedTextColor.GRAY),
+                plain("Left click: +" + HALF_TIME_STEP_SECONDS + " seconds", NamedTextColor.GREEN),
+                plain("Right click: -" + HALF_TIME_STEP_SECONDS + " seconds", NamedTextColor.RED));
     }
 
     /** Invite menu: pick which team to invite players to. */
@@ -1078,6 +1144,16 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     Match.Vacancy empty = match.vacancyFor(team);
                     entries.add(createHead(sub, empty == null ? "Click to sub on"
                             : "Click to take " + empty.name() + "'s place"));
+                }
+                // Players sent off with a red card are listed too, so a referee can bring them back on.
+                for (Map.Entry<UUID, Team> sentOff : match.sentOff.entrySet()) {
+                    if (sentOff.getValue() != team) continue;
+                    Player off = Bukkit.getPlayer(sentOff.getKey());
+                    if (off == null) continue;
+                    Match.Vacancy empty = match.vacancyFor(team);
+                    entries.add(createHead(off, empty != null ? "Sent off - click to take " + empty.name() + "'s place"
+                            : !match.isFull(team) ? "Sent off - click to bring back on"
+                            : "Sent off - click to sub on"));
                 }
             }
             case SUB_OUT -> {
@@ -1228,11 +1304,39 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                         cancelMatch(match);
                     });
                     case SLOT_INVITE -> later(() -> openTeamMenu(host));
+                    case SLOT_TIMINGS -> later(() -> openTimingsMenu(host));
                     case SLOT_STADIUM -> later(() -> openPagedMenu(host, MenuType.STADIUMS, 1, null));
                     case SLOT_START -> later(() -> {
                         if (beginMatch(host, match)) host.closeInventory();
                         else openMainMenu(host); // not ready: warn in chat and show the menu again
                     });
+                    default -> { }
+                }
+            }
+            case TIMINGS -> {
+                if (match.started) {
+                    later(host::closeInventory);
+                    return;
+                }
+                boolean raise = !event.isRightClick(); // left click goes up, right click goes down; both wrap round
+                switch (slot) {
+                    case SLOT_LEFT -> {
+                        int minutes = match.playSeconds * 2 / 60 + (raise ? MATCH_STEP_MINUTES : -MATCH_STEP_MINUTES);
+                        if (minutes > MAX_MATCH_MINUTES) minutes = MIN_MATCH_MINUTES;
+                        else if (minutes < MIN_MATCH_MINUTES) minutes = MAX_MATCH_MINUTES;
+                        match.playSeconds = minutes * 60 / 2; // the two halves share the total
+                        event.getView().getTopInventory().setItem(SLOT_LEFT, matchLengthItem(match));
+                        host.playSound(Sound.sound(Key.key("ui.button.click"), Sound.Source.MASTER, 0.6f, 1.2f));
+                    }
+                    case SLOT_RIGHT -> {
+                        int seconds = match.halfTimeSeconds + (raise ? HALF_TIME_STEP_SECONDS : -HALF_TIME_STEP_SECONDS);
+                        if (seconds > MAX_HALF_TIME_SECONDS) seconds = MIN_HALF_TIME_SECONDS;
+                        else if (seconds < MIN_HALF_TIME_SECONDS) seconds = MAX_HALF_TIME_SECONDS;
+                        match.halfTimeSeconds = seconds;
+                        event.getView().getTopInventory().setItem(SLOT_RIGHT, halfTimeItem(match));
+                        host.playSound(Sound.sound(Key.key("ui.button.click"), Sound.Source.MASTER, 0.6f, 1.2f));
+                    }
+                    case SLOT_BACK -> later(() -> openMainMenu(host));
                     default -> { }
                 }
             }
@@ -1347,6 +1451,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 if (match.vacancyFor(menu.team) != null) {
                     // A player disconnected: the substitute simply takes their place.
                     fillVacancy(host, match, menu.team, target.getUniqueId());
+                    later(() -> openPagedMenu(host, MenuType.SUBS, 1, menu.team, false, null));
+                } else if (match.sentOff.get(target.getUniqueId()) == menu.team && !match.isFull(menu.team)) {
+                    // Sent off and the team is a player short: they just come back on, nobody has to come off.
+                    returnSentOff(host, match, menu.team, target);
                     later(() -> openPagedMenu(host, MenuType.SUBS, 1, menu.team, false, null));
                 } else {
                     // A substitute was picked: now choose which player comes off.
@@ -1501,6 +1609,15 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return match.started && (match.phase == Match.Phase.COUNTDOWN || match.paused);
     }
 
+    /**
+     * The half-time break before its final five seconds: the clock runs and the ball is held at the centre, but
+     * players walk about freely. In the last five seconds everyone is put back on their positions and frozen.
+     */
+    private boolean isHalfTimeBreak(Match match) {
+        return match.started && match.phase == Match.Phase.COUNTDOWN
+                && match.countdownType == Match.CountdownType.HALF_TIME && match.countdownLeft > COUNTDOWN_SECONDS;
+    }
+
     private void freezeBall(Match match) {
         if (match.ball == null) return;
         match.ball.setGravity(false);
@@ -1514,11 +1631,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return null;
     }
 
-    /** During the half-time countdown players can look around but can't move. */
+    /** During a countdown (and the last five seconds of half time) players can look around but can't move. */
     @EventHandler
     public void onMove(PlayerMoveEvent event) {
         Match match = matchByPlayer.get(event.getPlayer().getUniqueId());
-        if (match == null || !isFrozen(match)) return;
+        if (match == null || !isFrozen(match) || isHalfTimeBreak(match)) return;
         if (match.isSideline(event.getPlayer().getUniqueId())) return; // referees and substitutes can walk around
 
         Location from = event.getFrom();
@@ -1554,6 +1671,16 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     && byEntity.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK
                     && !isWatching(kicker.getUniqueId())) {
                 oneBounce.onHit(kicker, kickVelocity(kicker));
+            }
+            return;
+        }
+
+        if (colorCover != null && colorCover.ownsBall(event.getEntity())) {
+            // Color Cover: every player has their own ball, and any player in the game may punch any of them.
+            if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker
+                    && byEntity.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK
+                    && !isWatching(kicker.getUniqueId())) {
+                colorCover.onHit(kicker, event.getEntity(), kickVelocity(kicker));
             }
             return;
         }
@@ -1622,15 +1749,23 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         match.phase = Match.Phase.COUNTDOWN;
         match.countdownType = type;
         match.resumePhase = resumePhase;
-        match.countdownLeft = COUNTDOWN_SECONDS;
+        match.countdownLeft = type == Match.CountdownType.HALF_TIME ? match.halfTimeSeconds : COUNTDOWN_SECONDS;
 
-        if (type == Match.CountdownType.HALF_TIME) returnSentOffPlayers(match);
-
-        // Every freeze (start, goal, half time): players go to their team's stadium positions, the ball to the centre.
-        resetPositions(match);
-        freezeBall(match);
-        showCountdown(match);
-        playFreezeSound(match, 1.0f); // 5
+        if (type == Match.CountdownType.HALF_TIME) {
+            returnSentOffPlayers(match);
+            // Half time: players move freely and stay where they are; only the ball goes back to the centre.
+            // Everyone is put on their positions when the last five seconds begin (see the task below).
+            Location ballSpawn = ballSpawnPoint(match);
+            if (ballSpawn != null) spawnBall(match, ballSpawn);
+            freezeBall(match);
+            showCountdown(match);
+        } else {
+            // Every other freeze (start, goal): players go to their team's stadium positions, the ball to the centre.
+            resetPositions(match);
+            freezeBall(match);
+            showCountdown(match);
+            playFreezeSound(match, 1.0f); // 5
+        }
 
         match.countdownTask = Bukkit.getScheduler().runTaskTimer(plugin, () -> {
             match.countdownLeft--;
@@ -1638,8 +1773,17 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 match.countdownTask.cancel();
                 endCountdown(match);
             } else {
+                if (match.countdownType == Match.CountdownType.HALF_TIME) {
+                    if (match.countdownLeft == COUNTDOWN_SECONDS) {
+                        resetPositions(match); // the 5 second countdown: back on the pitch, on the positions, frozen
+                    }
+                    freezeBall(match); // nobody can nudge the ball while players walk about
+                }
                 showCountdown(match);
-                playFreezeSound(match, 1.0f); // a ding every second: 5 (when it starts), 4, 3, 2, 1
+                // A ding every second: 5 (when it starts), 4, 3, 2, 1. Half time only dings for its last five seconds.
+                if (match.countdownType != Match.CountdownType.HALF_TIME || match.countdownLeft <= COUNTDOWN_SECONDS) {
+                    playFreezeSound(match, 1.0f);
+                }
             }
         }, 20L, 20L);
     }
@@ -1755,12 +1899,37 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         int n = match.countdownLeft;
         String label = switch (match.countdownType) {
             case START -> "Match starts in " + n;
-            case HALF_TIME -> "Half Time - second half starts in " + n;
+            case HALF_TIME -> "Half Time - second half starts in " + String.format("%d:%02d", n / 60, n % 60);
             case GOAL -> "Goal! Play resumes in " + n;
         };
         match.timerBar.color(BossBar.Color.GREEN);
-        match.timerBar.progress(1.0f);
+        match.timerBar.progress(match.countdownType == Match.CountdownType.HALF_TIME
+                ? Math.min(1.0f, n / (float) match.halfTimeSeconds) : 1.0f);
         match.timerBar.name(Component.text(label, NamedTextColor.GREEN, TextDecoration.BOLD));
+
+        if (match.countdownType == Match.CountdownType.HALF_TIME) {
+            // The half-time clock sits on the action bar, just above the hotbar, for the whole break.
+            String clock = String.format("%d:%02d", n / 60, n % 60);
+            Component actionBar = Component.text("Half Time - " + clock, NamedTextColor.GOLD, TextDecoration.BOLD);
+            for (Player p : match.onlineAudience()) p.sendActionBar(actionBar);
+
+            if (n == match.halfTimeSeconds) {
+                // One title when half time starts.
+                Title halfTime = Title.title(Component.text("Half Time", NamedTextColor.GOLD, TextDecoration.BOLD),
+                        Component.text("Second half starts in " + clock, NamedTextColor.GRAY),
+                        Title.Times.times(Duration.ZERO, Duration.ofSeconds(4), Duration.ofMillis(500)));
+                for (Player p : match.onlineAudience()) p.showTitle(halfTime);
+                playFreezeSound(match, 0.5f);
+            } else if (n == 15 || n == 10) {
+                // The 15 and 10 second warnings.
+                Title warning = Title.title(Component.text(n + " seconds", NamedTextColor.GOLD, TextDecoration.BOLD),
+                        Component.text("until the second half", NamedTextColor.GRAY),
+                        Title.Times.times(Duration.ZERO, Duration.ofMillis(1500), Duration.ofMillis(500)));
+                for (Player p : match.onlineAudience()) p.showTitle(warning);
+                playFreezeSound(match, 0.75f);
+            }
+            if (n > COUNTDOWN_SECONDS) return; // the big 5-4-3-2-1 titles are only for the last five seconds
+        }
 
         if (match.countdownType == Match.CountdownType.GOAL) {
             // The goal title is still on screen, so count down on the action bar instead.
@@ -2126,6 +2295,39 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return phase == Match.Phase.FIRST_HALF;
     }
 
+    /** Brings a sent-off player back on when their team is a player short, at the middle of the pitch. */
+    private boolean returnSentOff(Player official, Match match, Team team, Player player) {
+        UUID id = player.getUniqueId();
+        if (match.sentOff.get(id) != team) {
+            error(official, player.getName() + " wasn't sent off.");
+            return false;
+        }
+        if (match.isFull(team)) {
+            error(official, "The " + team.label + " team is full.");
+            return false;
+        }
+
+        match.sentOff.remove(id);
+        match.returnAtHalfTime.remove(id);
+        leaveStands(player, false);
+        match.teamSet(team).add(id);
+        giveJersey(match, player);
+        Location spot = match.stadium != null && match.stadium.hasCenter() ? match.stadium.center
+                : match.ball != null ? match.ball.getLocation() : null;
+        if (spot != null) player.teleport(spot);
+        player.setVelocity(new Vector(0, 0, 0));
+        player.setFallDistance(0f);
+        if (match.paused) dropToGround(player);
+
+        player.showTitle(Title.title(Component.text("You're back on!", NamedTextColor.GREEN),
+                Component.text("Brought on by " + official.getName())));
+        Component message = Component.text(official.getName() + " brought ", NamedTextColor.YELLOW)
+                .append(Component.text(player.getName(), team.color))
+                .append(Component.text(" back on.", NamedTextColor.YELLOW));
+        for (Player p : everyoneIn(match)) p.sendMessage(message);
+        return true;
+    }
+
     /** At half time, players sent off in the first half with nobody to replace them come back on. */
     private void returnSentOffPlayers(Match match) {
         for (UUID id : new ArrayList<>(match.returnAtHalfTime)) {
@@ -2240,13 +2442,15 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(official, "The " + team.label + " team has no empty spot.");
             return false;
         }
-        if (in == null || !match.subs(team).contains(inId)) {
+        if (in == null || match.benchTeamOf(inId) != team) {
             error(official, "That substitute isn't available.");
             return false;
         }
 
         match.vacancies.remove(vacancy);
         match.subs(team).remove(inId);
+        match.sentOff.remove(inId); // a sent-off player can be brought back on too
+        match.returnAtHalfTime.remove(inId);
         match.teamSet(team).add(inId);
         leaveStands(in, false);
         giveJersey(match, in);
@@ -2304,9 +2508,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         if (args.length == 2) { // /match sub <substitute>: fills the spot of a player who disconnected
             Player in = Bukkit.getPlayerExact(args[1]);
-            Team team = in == null ? null : match.subTeamOf(in.getUniqueId());
+            Team team = in == null ? null : match.benchTeamOf(in.getUniqueId());
             if (team == null) {
-                error(player, args[1] + " isn't a substitute in this match.");
+                error(player, args[1] + " isn't a substitute or a sent-off player in this match.");
             } else {
                 fillVacancy(player, match, team, in.getUniqueId());
             }
@@ -2322,9 +2526,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(player, "Both players need to be online.");
             return;
         }
-        Team team = match.subTeamOf(in.getUniqueId());
+        Team team = match.benchTeamOf(in.getUniqueId());
         if (team == null) {
-            error(player, in.getName() + " isn't a substitute in this match.");
+            error(player, in.getName() + " isn't a substitute or a sent-off player in this match.");
             return;
         }
         substitute(player, match, team, in.getUniqueId(), out);
@@ -2346,8 +2550,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             error(official, "That substitute is no longer online.");
             return false;
         }
-        if (!match.subs(team).contains(inId)) {
-            error(official, in.getName() + " isn't a " + team.label + " substitute.");
+        if (match.benchTeamOf(inId) != team) {
+            error(official, in.getName() + " isn't a " + team.label + " substitute or a sent-off " + team.label + " player.");
             return false;
         }
         if (!match.teamSet(team).contains(out.getUniqueId())) {
@@ -2358,6 +2562,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         Location spot = out.getLocation();
         match.teamSet(team).remove(out.getUniqueId());
         match.subs(team).remove(inId);
+        match.sentOff.remove(inId); // a sent-off player can be subbed back on
+        match.returnAtHalfTime.remove(inId);
         match.teamSet(team).add(inId);
         match.subs(team).add(out.getUniqueId());
 

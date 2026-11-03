@@ -47,7 +47,8 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
     enum Challenge {
         DUELS("Duels", "1v1, 5 minutes"),
         SMASH("Smash", "hit the ball against the wall, 2-" + SmashManager.MAX_PLAYERS + " players"),
-        ONEBOUNCE("One-Bounce", "punch the ball to others, one bounce only, 2-" + OneBounceManager.MAX_PLAYERS + " players");
+        ONEBOUNCE("One-Bounce", "punch the ball to others, one bounce only, 2-" + OneBounceManager.MAX_PLAYERS + " players"),
+        COLORCOVER("Color Cover", "paint the arena in your team's colour with your football, 2-" + ColorCoverManager.MAX_PLAYERS + " players");
 
         final String label;
         final String description;
@@ -86,9 +87,10 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
     // Same layout as the match menus.
     private static final int SLOT_SELECT = 11;
     private static final int SLOT_INVITE = 15;
-    private static final int SLOT_DUELS = 11;
-    private static final int SLOT_ONEBOUNCE = 13;
-    private static final int SLOT_SMASH = 15;
+    private static final int SLOT_DUELS = 10;
+    private static final int SLOT_ONEBOUNCE = 12;
+    private static final int SLOT_SMASH = 14;
+    private static final int SLOT_COLORCOVER = 16;
     private static final int SLOT_PREVIOUS = 21;
     private static final int SLOT_PAGE = 22;
     private static final int SLOT_NEXT = 23;
@@ -100,6 +102,7 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
     private final MatchManager matches;
     private final SmashManager smash;
     private final OneBounceManager oneBounce;
+    private final ColorCoverManager colorCover;
     private final NamespacedKey targetKey;
     private final Map<UUID, Challenge> selected = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
@@ -109,11 +112,13 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
     private final Set<UUID> bypassing = new LinkedHashSet<>();
     private final Map<UUID, Challenge> lobbyGames = new HashMap<>();
 
-    ChallengeManager(JavaPlugin plugin, MatchManager matches, SmashManager smash, OneBounceManager oneBounce) {
+    ChallengeManager(JavaPlugin plugin, MatchManager matches, SmashManager smash, OneBounceManager oneBounce,
+                     ColorCoverManager colorCover) {
         this.plugin = plugin;
         this.matches = matches;
         this.smash = smash;
         this.oneBounce = oneBounce;
+        this.colorCover = colorCover;
         this.targetKey = new NamespacedKey(plugin, "challenge_target");
     }
 
@@ -158,7 +163,7 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
         }
         if (!checkFree(player)) return;
         bypassing.add(player.getUniqueId());
-        player.sendMessage(Component.text("Bypass mode: select Smash or One-Bounce, then use /challenge start to play "
+        player.sendMessage(Component.text("Bypass mode: select Smash, One-Bounce or Color Cover, then use /challenge start to play "
                 + "without inviting anyone (alone, or with whoever has accepted).", NamedTextColor.GOLD));
         openMainMenu(player);
     }
@@ -231,6 +236,9 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
                 plain("Click to select", NamedTextColor.YELLOW)));
         inventory.setItem(SLOT_SMASH, button(sulfurWall(), Challenge.SMASH.label, NamedTextColor.GOLD,
                 plain(Challenge.SMASH.description, NamedTextColor.GRAY),
+                plain("Click to select", NamedTextColor.YELLOW)));
+        inventory.setItem(SLOT_COLORCOVER, button(Material.PAINTING, Challenge.COLORCOVER.label, NamedTextColor.GOLD,
+                plain(Challenge.COLORCOVER.description, NamedTextColor.GRAY),
                 plain("Click to select", NamedTextColor.YELLOW)));
         inventory.setItem(SLOT_BACK, backButton());
         player.openInventory(inventory);
@@ -349,9 +357,10 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
                 }
             }
             case SELECT -> {
-                if (slot == SLOT_DUELS || slot == SLOT_ONEBOUNCE || slot == SLOT_SMASH) {
+                if (slot == SLOT_DUELS || slot == SLOT_ONEBOUNCE || slot == SLOT_SMASH || slot == SLOT_COLORCOVER) {
                     Challenge game = slot == SLOT_DUELS ? Challenge.DUELS
-                            : slot == SLOT_ONEBOUNCE ? Challenge.ONEBOUNCE : Challenge.SMASH;
+                            : slot == SLOT_ONEBOUNCE ? Challenge.ONEBOUNCE
+                            : slot == SLOT_COLORCOVER ? Challenge.COLORCOVER : Challenge.SMASH;
                     selected.put(player.getUniqueId(), game);
                     later(() -> {
                         openMainMenu(player);
@@ -430,8 +439,8 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
         }
         if (game != Challenge.DUELS) {
             int joined = smashLobbies.getOrDefault(host.getUniqueId(), Set.of()).size();
-            if (1 + joined + outstanding >= SmashManager.MAX_PLAYERS) {
-                error(host, game.label + " can have at most " + SmashManager.MAX_PLAYERS + " players, counting you.");
+            if (1 + joined + outstanding >= maxPlayers(game)) {
+                error(host, game.label + " can have at most " + maxPlayers(game) + " players, counting you.");
                 return;
             }
         }
@@ -498,10 +507,20 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
         host.sendMessage(Component.text(player.getName() + " joined. " + total + " players ready. ", NamedTextColor.GREEN)
                 .append(Component.text("[Start " + game.label + "]", NamedTextColor.GOLD, TextDecoration.BOLD)
                         .clickEvent(ClickEvent.runCommand("/challenge start"))));
-        if (total >= SmashManager.MAX_PLAYERS) startLobby(host);
+        if (total >= maxPlayers(game)) startLobby(host);
     }
 
-    /** /challenge start: the host starts their game (Smash or One-Bounce) with everyone who has accepted so far. */
+    /** The most players a game can have, counting the host. */
+    private static int maxPlayers(Challenge game) {
+        return switch (game) {
+            case DUELS -> 2;
+            case SMASH -> SmashManager.MAX_PLAYERS;
+            case ONEBOUNCE -> OneBounceManager.MAX_PLAYERS;
+            case COLORCOVER -> ColorCoverManager.MAX_PLAYERS;
+        };
+    }
+
+    /** /challenge start: the host starts their game (Smash, One-Bounce or Color Cover) with everyone who has accepted so far. */
     private void startLobby(Player host) {
         boolean bypass = bypassing.contains(host.getUniqueId());
         Challenge game = lobbyGames.get(host.getUniqueId());
@@ -510,7 +529,7 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
         if (lobby == null && bypass) lobby = Set.of();
 
         if (game == null || lobby == null) {
-            error(host, "You haven't invited anyone. Use /challenge, select Smash or One-Bounce and invite players.");
+            error(host, "You haven't invited anyone. Use /challenge, select Smash, One-Bounce or Color Cover and invite players.");
             return;
         }
         if (game == Challenge.DUELS) {
@@ -527,7 +546,11 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
             error(host, "Nobody has accepted yet. " + game.label + " needs at least 2 players.");
             return;
         }
-        String problem = game == Challenge.ONEBOUNCE ? oneBounce.start(players, bypass) : smash.start(players, bypass);
+        String problem = switch (game) {
+            case ONEBOUNCE -> oneBounce.start(players, bypass);
+            case COLORCOVER -> colorCover.start(players, bypass);
+            default -> smash.start(players, bypass);
+        };
         if (problem != null) {
             players.forEach(p -> error(p, problem));
             return;

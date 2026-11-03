@@ -58,17 +58,25 @@ final class Celebration implements Listener {
      * winner, such as a draw) gets a "You won!" title and fireworks around them.
      */
     void finish(Collection<Player> everyone, Player winner) {
+        List<Player> winners = winner == null ? List.of() : List.of(winner);
+        finish(everyone, winners);
+    }
+
+    /** As above for a team win: everyone hears the sound once, and every winner gets the title and fireworks. */
+    void finish(Collection<Player> everyone, Collection<Player> winners) {
         for (Player p : everyone) {
             if (p.isOnline()) p.playSound(p.getLocation(), "entity.player.levelup", 1.0f, 1.0f);
         }
-        if (winner == null || !winner.isOnline()) return;
+        for (Player winner : winners) {
+            if (!winner.isOnline()) continue;
 
-        winner.showTitle(Title.title(Component.text("You won!", NamedTextColor.GOLD, TextDecoration.BOLD), Component.empty(),
-                Title.Times.times(Duration.ofMillis(250), Duration.ofSeconds(3), Duration.ofMillis(750))));
+            winner.showTitle(Title.title(Component.text("You won!", NamedTextColor.GOLD, TextDecoration.BOLD), Component.empty(),
+                    Title.Times.times(Duration.ofMillis(250), Duration.ofSeconds(3), Duration.ofMillis(750))));
 
-        for (int i = 0; i < FIREWORKS; i++) {
-            FireworkEffect effect = EFFECTS.get(i % EFFECTS.size());
-            Bukkit.getScheduler().runTaskLater(plugin, () -> launch(winner, effect), i * FIREWORK_GAP_TICKS);
+            for (int i = 0; i < FIREWORKS; i++) {
+                FireworkEffect effect = EFFECTS.get(i % EFFECTS.size());
+                Bukkit.getScheduler().runTaskLater(plugin, () -> launch(winner, effect), i * FIREWORK_GAP_TICKS);
+            }
         }
     }
 

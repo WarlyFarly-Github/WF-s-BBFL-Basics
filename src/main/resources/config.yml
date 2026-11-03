@@ -1,6 +1,10 @@
 # WF's BBFL Basics configuration.
 # (Lobby locations set with /setlobby are also stored in this file.)
 
+# Color Cover (a /challenge): how long a game lasts, in seconds (30 to 1800). Applies from the next game.
+color-cover:
+  duration-seconds: 180
+
 # /match invite server (operators) posts a message to one Discord channel to invite the whole Discord server.
 # It is sent through a channel webhook, so the channel is whichever channel the webhook belongs to.
 #

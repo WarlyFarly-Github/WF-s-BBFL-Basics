@@ -48,6 +48,8 @@ final class Match {
     private String redName = "";  // duels: the player on the Red side
     private String blueName = ""; // duels: the player on the Blue side
     int playSeconds = 5 * 60; // length of each half (league) or of the whole match (quick)
+    static final int DEFAULT_HALF_TIME_SECONDS = 60;
+    int halfTimeSeconds = DEFAULT_HALF_TIME_SECONDS; // length of the half-time break (league matches), set in the timings menu
     int redScore;
     int blueScore;
     boolean started;
@@ -150,6 +152,12 @@ final class Match {
     Team subTeamOf(UUID id) {
         if (redSubs.contains(id)) return Team.RED;
         return blueSubs.contains(id) ? Team.BLUE : null;
+    }
+
+    /** The team whose bench this player is on: a substitute, or someone sent off (a referee can bring them back on). */
+    Team benchTeamOf(UUID id) {
+        Team sub = subTeamOf(id);
+        return sub != null ? sub : sentOff.get(id);
     }
 
     /** On the sidelines: a referee or a substitute. They are in the match but not playing. */

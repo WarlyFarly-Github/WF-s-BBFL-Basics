@@ -98,7 +98,18 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
         matches.setOneBounce(oneBounce);
         getServer().getPluginManager().registerEvents(oneBounce, this);
 
-        ChallengeManager challenges = new ChallengeManager(this, matches, smash, oneBounce);
+        ColorCoverStadiums colorCoverStadiums = new ColorCoverStadiums(this);
+        PluginCommand colorCoverStadiumCommand = getCommand("ccstadium");
+        if (colorCoverStadiumCommand != null) {
+            colorCoverStadiumCommand.setExecutor(colorCoverStadiums);
+            colorCoverStadiumCommand.setTabCompleter(colorCoverStadiums);
+        }
+
+        ColorCoverManager colorCover = new ColorCoverManager(this, matches, colorCoverStadiums, celebration);
+        matches.setColorCover(colorCover);
+        getServer().getPluginManager().registerEvents(colorCover, this);
+
+        ChallengeManager challenges = new ChallengeManager(this, matches, smash, oneBounce, colorCover);
         getServer().getPluginManager().registerEvents(challenges, this);
         PluginCommand challengeCommand = getCommand("challenge");
         if (challengeCommand != null) {
