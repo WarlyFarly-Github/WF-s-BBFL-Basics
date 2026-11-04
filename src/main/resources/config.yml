@@ -36,3 +36,11 @@ server-invite:
 
   # Posted when a match you invited the server to is cancelled (or ended before kick-off).
   match-cancelled-message: "**{player}** cancelled the match on **{stadium}**. Sorry about that!"
+
+# Hot Potato: the ball is a bomb with a hidden fuse. When it goes off, everyone within the blast radius is out.
+hot-potato:
+  # The fuse is a random time between these two (seconds) every round.
+  fuse-min-seconds: 12
+  fuse-max-seconds: 25
+  # How far the blast reaches (blocks). A bomb that catches nobody makes the next one 1 block bigger, up to 9.
+  blast-radius: 4.0

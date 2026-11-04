@@ -109,7 +109,17 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
         matches.setColorCover(colorCover);
         getServer().getPluginManager().registerEvents(colorCover, this);
 
-        ChallengeManager challenges = new ChallengeManager(this, matches, smash, oneBounce, colorCover);
+        HotPotatoStadiums hotPotatoStadiums = new HotPotatoStadiums(this);
+        PluginCommand hotPotatoStadiumCommand = getCommand("hpstadium");
+        if (hotPotatoStadiumCommand != null) {
+            hotPotatoStadiumCommand.setExecutor(hotPotatoStadiums);
+            hotPotatoStadiumCommand.setTabCompleter(hotPotatoStadiums);
+        }
+        HotPotatoManager hotPotato = new HotPotatoManager(this, matches, hotPotatoStadiums, celebration);
+        matches.setHotPotato(hotPotato);
+        getServer().getPluginManager().registerEvents(hotPotato, this);
+
+        ChallengeManager challenges = new ChallengeManager(this, matches, smash, oneBounce, colorCover, hotPotato);
         getServer().getPluginManager().registerEvents(challenges, this);
         PluginCommand challengeCommand = getCommand("challenge");
         if (challengeCommand != null) {

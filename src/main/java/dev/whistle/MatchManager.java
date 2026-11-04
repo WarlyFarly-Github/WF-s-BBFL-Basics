@@ -200,6 +200,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     void setColorCover(ColorCoverManager colorCover) {
         this.colorCover = colorCover;
     }
+
+    private HotPotatoManager hotPotato;
+
+    void setHotPotato(HotPotatoManager hotPotato) {
+        this.hotPotato = hotPotato;
+    }
     private Celebration celebration;
 
     void setCelebration(Celebration celebration) {
@@ -264,7 +270,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return matchOfBall(ball) != null
                 || (smash != null && smash.ownsBall(ball))
                 || (oneBounce != null && oneBounce.ownsBall(ball))
-                || (colorCover != null && colorCover.ownsBall(ball));
+                || (colorCover != null && colorCover.ownsBall(ball))
+                || (hotPotato != null && hotPotato.ownsBall(ball));
     }
 
     /** Removes any of our balls near this spot that no game is using, before a fresh one is spawned there. */
@@ -288,6 +295,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (smash != null) smash.shutdown();
         if (oneBounce != null) oneBounce.shutdown();
         if (colorCover != null) colorCover.shutdown();
+        if (hotPotato != null) hotPotato.shutdown();
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
             m.onlineAudience().forEach(p -> restoreChestplate(m, p));
@@ -416,7 +424,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         if (isWatching(host.getUniqueId()) || (smash != null && smash.isPlaying(host.getUniqueId()))
                 || (oneBounce != null && oneBounce.isPlaying(host.getUniqueId()))
-                || (colorCover != null && colorCover.isPlaying(host.getUniqueId()))) {
+                || (colorCover != null && colorCover.isPlaying(host.getUniqueId()))
+                || (hotPotato != null && hotPotato.isPlaying(host.getUniqueId()))) {
             error(host, "You are watching or playing something. Use /match leave first.");
             return;
         }
@@ -506,7 +515,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     boolean isInMatch(UUID id) {
         return matchByPlayer.containsKey(id) || (smash != null && smash.isPlaying(id))
                 || (oneBounce != null && oneBounce.isPlaying(id))
-                || (colorCover != null && colorCover.isPlaying(id));
+                || (colorCover != null && colorCover.isPlaying(id))
+                || (hotPotato != null && hotPotato.isPlaying(id));
     }
 
     /** True if a running match is being played on this stadium. */
@@ -829,6 +839,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (smash != null && smash.leave(player)) return; // playing Smash
         if (oneBounce != null && oneBounce.leave(player)) return; // playing One-Bounce
         if (colorCover != null && colorCover.leave(player)) return; // playing Color Cover
+        if (hotPotato != null && hotPotato.leave(player)) return; // playing Hot Potato
         Match match = matchByPlayer.get(player.getUniqueId());
         if (match == null) {
             error(player, "You are not in a match.");
@@ -1671,6 +1682,16 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     && byEntity.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK
                     && !isWatching(kicker.getUniqueId())) {
                 oneBounce.onHit(kicker, kickVelocity(kicker));
+            }
+            return;
+        }
+
+        if (hotPotato != null && hotPotato.ownsBall(event.getEntity())) {
+            // Hot Potato: a normal football kick on a bomb that blows up near whoever it is closest to.
+            if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker
+                    && byEntity.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK
+                    && !isWatching(kicker.getUniqueId())) {
+                hotPotato.onHit(kicker, event.getEntity(), kickVelocity(kicker));
             }
             return;
         }

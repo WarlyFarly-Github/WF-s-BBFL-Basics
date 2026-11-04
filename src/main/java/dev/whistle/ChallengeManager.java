@@ -48,7 +48,8 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
         DUELS("Duels", "1v1, 5 minutes"),
         SMASH("Smash", "hit the ball against the wall, 2-" + SmashManager.MAX_PLAYERS + " players"),
         ONEBOUNCE("One-Bounce", "punch the ball to others, one bounce only, 2-" + OneBounceManager.MAX_PLAYERS + " players"),
-        COLORCOVER("Color Cover", "paint the arena in your team's colour with your football, 2-" + ColorCoverManager.MAX_PLAYERS + " players");
+        COLORCOVER("Color Cover", "paint the arena in your team's colour with your football, 2-" + ColorCoverManager.MAX_PLAYERS + " players"),
+        HOTPOTATO("Hot Potato", "kick the ticking bomb away on a slippery floor, 2-" + HotPotatoManager.MAX_PLAYERS + " players");
 
         final String label;
         final String description;
@@ -87,10 +88,11 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
     // Same layout as the match menus.
     private static final int SLOT_SELECT = 11;
     private static final int SLOT_INVITE = 15;
-    private static final int SLOT_DUELS = 10;
-    private static final int SLOT_ONEBOUNCE = 12;
-    private static final int SLOT_SMASH = 14;
-    private static final int SLOT_COLORCOVER = 16;
+    private static final int SLOT_DUELS = 9;       // five challenges, evenly spaced along the middle row
+    private static final int SLOT_ONEBOUNCE = 11;
+    private static final int SLOT_SMASH = 13;
+    private static final int SLOT_COLORCOVER = 15;
+    private static final int SLOT_HOTPOTATO = 17;
     private static final int SLOT_PREVIOUS = 21;
     private static final int SLOT_PAGE = 22;
     private static final int SLOT_NEXT = 23;
@@ -103,6 +105,7 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
     private final SmashManager smash;
     private final OneBounceManager oneBounce;
     private final ColorCoverManager colorCover;
+    private final HotPotatoManager hotPotato;
     private final NamespacedKey targetKey;
     private final Map<UUID, Challenge> selected = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
@@ -113,12 +116,13 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
     private final Map<UUID, Challenge> lobbyGames = new HashMap<>();
 
     ChallengeManager(JavaPlugin plugin, MatchManager matches, SmashManager smash, OneBounceManager oneBounce,
-                     ColorCoverManager colorCover) {
+                     ColorCoverManager colorCover, HotPotatoManager hotPotato) {
         this.plugin = plugin;
         this.matches = matches;
         this.smash = smash;
         this.oneBounce = oneBounce;
         this.colorCover = colorCover;
+        this.hotPotato = hotPotato;
         this.targetKey = new NamespacedKey(plugin, "challenge_target");
     }
 
@@ -240,6 +244,9 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
         inventory.setItem(SLOT_COLORCOVER, button(Material.PAINTING, Challenge.COLORCOVER.label, NamedTextColor.GOLD,
                 plain(Challenge.COLORCOVER.description, NamedTextColor.GRAY),
                 plain("Click to select", NamedTextColor.YELLOW)));
+        inventory.setItem(SLOT_HOTPOTATO, button(Material.TNT, Challenge.HOTPOTATO.label, NamedTextColor.GOLD,
+                plain(Challenge.HOTPOTATO.description, NamedTextColor.GRAY),
+                plain("Click to select", NamedTextColor.YELLOW)));
         inventory.setItem(SLOT_BACK, backButton());
         player.openInventory(inventory);
     }
@@ -357,10 +364,12 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
                 }
             }
             case SELECT -> {
-                if (slot == SLOT_DUELS || slot == SLOT_ONEBOUNCE || slot == SLOT_SMASH || slot == SLOT_COLORCOVER) {
+                if (slot == SLOT_DUELS || slot == SLOT_ONEBOUNCE || slot == SLOT_SMASH || slot == SLOT_COLORCOVER
+                        || slot == SLOT_HOTPOTATO) {
                     Challenge game = slot == SLOT_DUELS ? Challenge.DUELS
                             : slot == SLOT_ONEBOUNCE ? Challenge.ONEBOUNCE
-                            : slot == SLOT_COLORCOVER ? Challenge.COLORCOVER : Challenge.SMASH;
+                            : slot == SLOT_COLORCOVER ? Challenge.COLORCOVER
+                            : slot == SLOT_HOTPOTATO ? Challenge.HOTPOTATO : Challenge.SMASH;
                     selected.put(player.getUniqueId(), game);
                     later(() -> {
                         openMainMenu(player);
@@ -517,10 +526,11 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
             case SMASH -> SmashManager.MAX_PLAYERS;
             case ONEBOUNCE -> OneBounceManager.MAX_PLAYERS;
             case COLORCOVER -> ColorCoverManager.MAX_PLAYERS;
+            case HOTPOTATO -> HotPotatoManager.MAX_PLAYERS;
         };
     }
 
-    /** /challenge start: the host starts their game (Smash, One-Bounce or Color Cover) with everyone who has accepted so far. */
+    /** /challenge start: the host starts their game (Smash, One-Bounce, Color Cover or Hot Potato) with everyone who has accepted so far. */
     private void startLobby(Player host) {
         boolean bypass = bypassing.contains(host.getUniqueId());
         Challenge game = lobbyGames.get(host.getUniqueId());
@@ -529,7 +539,7 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
         if (lobby == null && bypass) lobby = Set.of();
 
         if (game == null || lobby == null) {
-            error(host, "You haven't invited anyone. Use /challenge, select Smash, One-Bounce or Color Cover and invite players.");
+            error(host, "You haven't invited anyone. Use /challenge, select Smash, One-Bounce, Color Cover or Hot Potato and invite players.");
             return;
         }
         if (game == Challenge.DUELS) {
@@ -549,6 +559,7 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
         String problem = switch (game) {
             case ONEBOUNCE -> oneBounce.start(players, bypass);
             case COLORCOVER -> colorCover.start(players, bypass);
+            case HOTPOTATO -> hotPotato.start(players, bypass);
             default -> smash.start(players, bypass);
         };
         if (problem != null) {

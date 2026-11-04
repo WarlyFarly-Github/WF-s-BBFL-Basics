@@ -38,6 +38,10 @@ commands:
     description: Create and edit Color Cover arenas (operators only).
     usage: /ccstadium <create|delete|list|info|setspawn|bounds|edit|confirm>
     permission: wfsbbfl.ccstadium
+  hpstadium:
+    description: Create and edit Hot Potato arenas (operators only).
+    usage: /hpstadium <create|delete|list|info|setpos|clearpos|bounds|edit|confirm>
+    permission: wfsbbfl.hpstadium
   setlobby:
     description: Set a lobby location (operators only).
     usage: /setlobby quickmatch
@@ -79,6 +83,9 @@ permissions:
     default: op
   wfsbbfl.ccstadium:
     description: Allows /ccstadium
+    default: op
+  wfsbbfl.hpstadium:
+    description: Allows /hpstadium
     default: op
   wfsbbfl.challengebypass:
     description: Allows /challenge bypass
