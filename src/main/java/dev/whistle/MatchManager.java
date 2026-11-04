@@ -201,6 +201,23 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.colorCover = colorCover;
     }
 
+    private RouletteManager roulette;
+
+    void setRoulette(RouletteManager roulette) {
+        this.roulette = roulette;
+    }
+
+    /** True while this match still has players (it has not ended or been cancelled). */
+    boolean isLive(Match match) {
+        return matchByPlayer.containsValue(match);
+    }
+
+    /** True if both players are playing in the same match. */
+    boolean inSameMatch(Player a, Player b) {
+        Match match = matchByPlayer.get(a.getUniqueId());
+        return match != null && match == matchByPlayer.get(b.getUniqueId());
+    }
+
     private HotPotatoManager hotPotato;
 
     void setHotPotato(HotPotatoManager hotPotato) {
@@ -296,6 +313,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (oneBounce != null) oneBounce.shutdown();
         if (colorCover != null) colorCover.shutdown();
         if (hotPotato != null) hotPotato.shutdown();
+        if (roulette != null) roulette.shutdown();
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
             m.onlineAudience().forEach(p -> restoreChestplate(m, p));
@@ -529,7 +547,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
      * start countdown runs. Returns false if it can't start (fewer than 2 players, or the stadium is taken).
      */
     boolean startQuickMatch(Stadium stadium, int minutes, List<Player> players, Map<UUID, Location> origins) {
-        return launchQuickMatch(stadium, minutes, players, origins, false);
+        return launchQuickMatch(stadium, minutes, players, origins, false, false);
     }
 
     /**
@@ -537,6 +555,29 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
      * using. Returns null on success, or a message saying why it couldn't start.
      */
     String startDuel(Player a, Player b) {
+        Stadium stadium = pickFreeStadium();
+        if (stadium == null) return "No finished stadium is free right now, so the duel can't start.";
+        boolean started = launchQuickMatch(stadium, 5, List.of(a, b), Map.of(), true, false);
+        return started ? null : "The duel couldn't start.";
+    }
+
+    /**
+     * Starts Roulette: a 5 minute quickmatch with teams on a random finished stadium nobody is using, where everyone
+     * gets a random power every 30 seconds. Returns null on success, or a message saying why it couldn't start.
+     */
+    String startRoulette(List<Player> players) {
+        if (players.size() < 2) return "Roulette needs at least 2 players, even with bypass.";
+        if (players.size() > RouletteManager.MAX_PLAYERS) {
+            return "Roulette can have at most " + RouletteManager.MAX_PLAYERS + " players.";
+        }
+        Stadium stadium = pickFreeStadium();
+        if (stadium == null) return "No finished stadium is free right now, so Roulette can't start.";
+        boolean started = launchQuickMatch(stadium, RouletteManager.MINUTES, players, Map.of(), false, true);
+        return started ? null : "Roulette couldn't start.";
+    }
+
+    /** A random finished stadium that no match is on and no quickmatch lobby has reserved, or null. */
+    private Stadium pickFreeStadium() {
         List<Stadium> free = new ArrayList<>();
         for (String name : stadiums.names()) {
             Stadium stadium = stadiums.get(name);
@@ -545,14 +586,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 free.add(stadium);
             }
         }
-        if (free.isEmpty()) return "No finished stadium is free right now, so the duel can't start.";
-        Stadium stadium = free.get(new java.util.Random().nextInt(free.size()));
-        boolean started = launchQuickMatch(stadium, 5, List.of(a, b), Map.of(), true);
-        return started ? null : "The duel couldn't start.";
+        return free.isEmpty() ? null : free.get(new java.util.Random().nextInt(free.size()));
     }
 
     private boolean launchQuickMatch(Stadium stadium, int minutes, List<Player> players, Map<UUID, Location> origins,
-                                     boolean duel) {
+                                     boolean duel, boolean rouletteMode) {
         List<Player> ready = new ArrayList<>(players.stream()
                 .filter(p -> p.isOnline() && !matchByPlayer.containsKey(p.getUniqueId())).toList());
         if (ready.size() < 2 || !stadium.isComplete() || stadiumInUse(stadium)) return false;
@@ -561,6 +599,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         match.stadium = stadium;
         match.playSeconds = minutes * 60;
         match.started = true;
+        match.roulette = rouletteMode;
         match.ballStart = stadium.center.clone();
 
         Collections.shuffle(ready);
@@ -579,6 +618,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                                 NamedTextColor.GREEN)
                         .append(Component.text(opponent.getName(), NamedTextColor.WHITE, TextDecoration.BOLD))
                         .append(Component.text(".", NamedTextColor.GREEN)));
+            } else if (rouletteMode) {
+                p.sendMessage(Component.text("Roulette has started! You are on the ", NamedTextColor.GREEN)
+                        .append(Component.text(team.label, team.color, TextDecoration.BOLD))
+                        .append(Component.text(" team. Every 30 seconds everyone gets a random power: some help, some hurt!",
+                                NamedTextColor.GREEN)));
             } else {
                 p.sendMessage(Component.text("The quickmatch has started! You are on the ", NamedTextColor.GREEN)
                         .append(Component.text(team.label, team.color, TextDecoration.BOLD))
@@ -586,6 +630,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             }
         }
         startTimer(match);
+        if (rouletteMode && roulette != null) roulette.register(match);
         return true;
     }
 
@@ -1607,7 +1652,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private Vector kickVelocity(Player kicker) {
         Vector direction = kicker.getLocation().getDirection().setY(0);
         if (direction.lengthSquared() < 1.0E-4) direction = new Vector(0, 0, 1);
-        double power = kicker.isSprinting() ? 1.5 : 1.0;
+        double power = (kicker.isSprinting() ? 1.5 : 1.0) * (roulette == null ? 1.0 : roulette.kickMultiplier(kicker));
         return direction.normalize().multiply(power).setY(0.35);
     }
 
@@ -1903,7 +1948,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private void updateTimerBar(Match match) {
         int seconds = Math.max(match.secondsLeft, 0);
         String time = String.format("%d:%02d", seconds / 60, seconds % 60);
-        String half = match.duel ? "Duel" : match.quick ? "Quickmatch"
+        String half = match.duel ? "Duel" : match.roulette ? "Roulette" : match.quick ? "Quickmatch"
                 : match.phase == Match.Phase.FIRST_HALF ? "First Half" : "Second Half";
 
         match.timerBar.progress(Math.min(1.0f, seconds / (float) match.playSeconds));
@@ -2010,6 +2055,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private void restoreChestplate(Match match, Player player) {
+        if (roulette != null) roulette.clearPowers(player); // Roulette powers end with the match
         removeRefereeWhistle(player);
         if (!match.duel) clearNameColor(player);
         GameMode savedMode = match.savedGameModes.remove(player.getUniqueId());

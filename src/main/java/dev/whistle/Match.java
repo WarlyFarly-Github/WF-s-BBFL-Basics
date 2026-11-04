@@ -44,6 +44,7 @@ final class Match {
 
     final UUID host; // null for quickmatches, which have no host
     boolean quick;   // quickmatch: one period, no half time
+    boolean roulette; // Roulette: a quickmatch where everyone gets a random power every 30 seconds
     boolean duel;    // a duel: a 5 minute 1v1 quickmatch with no red and blue teams (players are shown by name)
     private String redName = "";  // duels: the player on the Red side
     private String blueName = ""; // duels: the player on the Blue side
