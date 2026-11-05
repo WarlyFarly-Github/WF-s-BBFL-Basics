@@ -2,6 +2,7 @@ package dev.whistle;
 
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
@@ -34,6 +35,7 @@ import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.inventory.meta.SkullMeta;
 import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
@@ -45,26 +47,26 @@ import org.joml.Vector3f;
 
 import java.time.Duration;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
 import java.util.UUID;
 
 /**
- * /training: practise on your own in a football stadium of your choice.
+ * /training: practise in a football stadium of your choice.
  *
- * Free Play is just a football to kick around for as long as you like. Dodge is the same, but there are obstacles
- * sliding across the pitch between you and the goal: touch one and the run resets, get the ball into the goal without
- * touching one and you score a point (and it resets). In both, the lime concrete in your hotbar starts the training
- * (puts the ball down) and the red concrete stops it and takes you back to where you were.
+ * Free Play is a football to kick around for as long as you like, on your own or with friends you invite. Goals count
+ * like in a normal match, there is just no clock. Dodge is a solo version with obstacles sliding across the pitch between
+ * you and the goal: if you or the ball touch one the run resets, get the ball into the goal without touching one and you
+ * score a point (and it resets). The lime concrete in your hotbar starts it (puts the ball down) and the red concrete stops it.
  */
 final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
 
     private enum Mode { FREE_PLAY, DODGE }
 
-    private enum MenuType { MODE, STADIUMS }
+    private enum MenuType { MODE, STADIUMS, INVITE }
 
     private static final int SLOT_FREE_PLAY = 11;
     private static final int SLOT_DODGE = 15;
@@ -73,9 +75,13 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
     private static final int SLOT_BACK = 26;
     private static final int PAGE_SIZE = 18;
 
-    private static final int HOTBAR_START = 3; // the lime concrete
-    private static final int HOTBAR_STOP = 5;  // the red concrete
+    private static final int HOTBAR_START = 3;  // the lime concrete
+    private static final int HOTBAR_INVITE = 4; // the diamond (the host of a Free Play only)
+    private static final int HOTBAR_STOP = 5;   // the red concrete
 
+    private static final int MAX_MEMBERS = 10;
+    private static final long INVITE_MILLIS = 60_000;
+    private static final int GOAL_PAUSE_TICKS = 60;      // after a Free Play goal, the ball comes back after 3 seconds
     private static final int HIT_COOLDOWN_TICKS = 4;
     private static final int OUT_RESET_COOLDOWN_TICKS = 40;
     private static final double BOUNCE_MAX_DISTANCE = 4.0;
@@ -104,7 +110,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         }
     }
 
-    /** An obstacle: a block that slides from side to side across the pitch. It is drawn as a block display and its box is checked by hand. */
+    /** An obstacle: a block that slides from side to side across the pitch. It is drawn as a block display and touching it is checked by hand. */
     private static final class Obstacle {
         private final BlockDisplay display;
         private final Location anchor; // the middle of its path, at floor level
@@ -130,23 +136,42 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
             return anchor.getZ() + side.getZ() * amplitude * Math.sin(phase + omega * tick);
         }
 
-        private BoundingBox box(long tick) {
+        /** What counts as touching it (for the player or the ball): taller than it looks, so a slope in the floor or a jump can't get past it. */
+        private BoundingBox hitBox(long tick) {
             double x = centreX(tick);
             double z = centreZ(tick);
-            return new BoundingBox(x - OBSTACLE_WIDTH / 2, anchor.getY(), z - OBSTACLE_WIDTH / 2,
-                    x + OBSTACLE_WIDTH / 2, anchor.getY() + OBSTACLE_HEIGHT, z + OBSTACLE_WIDTH / 2);
+            return new BoundingBox(x - OBSTACLE_WIDTH / 2, anchor.getY() - 1.5, z - OBSTACLE_WIDTH / 2,
+                    x + OBSTACLE_WIDTH / 2, anchor.getY() + OBSTACLE_HEIGHT + 1.0, z + OBSTACLE_WIDTH / 2);
+        }
+    }
+
+    /** One player in a session and what to give back to them when they leave it. */
+    private static final class Member {
+        private final Location origin;
+        private final GameMode savedMode;
+        private final ItemStack savedStart;
+        private final ItemStack savedInvite;
+        private final ItemStack savedStop;
+        private final boolean usesInviteSlot;
+        private long lastHit = -100;
+
+        private Member(Location origin, GameMode savedMode, ItemStack savedStart, ItemStack savedInvite, ItemStack savedStop,
+                       boolean usesInviteSlot) {
+            this.origin = origin;
+            this.savedMode = savedMode;
+            this.savedStart = savedStart;
+            this.savedInvite = savedInvite;
+            this.savedStop = savedStop;
+            this.usesInviteSlot = usesInviteSlot;
         }
     }
 
     private static final class Session {
-        private final UUID player;
+        private final UUID owner;
         private final Mode mode;
         private final Stadium stadium;
         private final World world;
-        private final Location origin;
-        private final GameMode savedMode;
-        private final ItemStack savedStart;
-        private final ItemStack savedStop;
+        private final Map<UUID, Member> members = new LinkedHashMap<>();
         private final BossBar bar = BossBar.bossBar(Component.empty(), 1.0f, BossBar.Color.GREEN, BossBar.Overlay.PROGRESS);
 
         private boolean running;
@@ -154,8 +179,13 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         private BukkitTask task;
         private SulfurCube ball;
         private Vector lastVelocity; // its velocity the last time it was inside the bounds, for bouncing
-        private long lastHit = -100;
         private long lastReset = -1000;
+        private UUID lastKicker;
+
+        // Free Play
+        private int redScore;
+        private int blueScore;
+        private int ballWait; // ticks until the ball comes back after a goal
 
         // Dodge
         private Location start;
@@ -164,25 +194,24 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         private int points;
         private int hits;
 
-        private Session(UUID player, Mode mode, Stadium stadium, Location origin, GameMode savedMode, ItemStack savedStart,
-                        ItemStack savedStop) {
-            this.player = player;
+        private Session(UUID owner, Mode mode, Stadium stadium) {
+            this.owner = owner;
             this.mode = mode;
             this.stadium = stadium;
             this.world = stadium.center.getWorld();
-            this.origin = origin;
-            this.savedMode = savedMode;
-            this.savedStart = savedStart;
-            this.savedStop = savedStop;
         }
     }
+
+    private record Invite(Session session, long time) { }
 
     private final JavaPlugin plugin;
     private final MatchManager matches;
     private final StadiumManager stadiums;
     private final NamespacedKey itemKey;
     private final Random random = new Random();
-    private final Map<UUID, Session> sessions = new HashMap<>();
+    private final List<Session> all = new ArrayList<>();
+    private final Map<UUID, Session> byPlayer = new HashMap<>();
+    private final Map<UUID, Invite> invites = new HashMap<>();
 
     TrainingManager(JavaPlugin plugin, MatchManager matches, StadiumManager stadiums) {
         this.plugin = plugin;
@@ -192,18 +221,18 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     boolean isTraining(UUID id) {
-        return sessions.containsKey(id);
+        return byPlayer.containsKey(id);
     }
 
     boolean isUsing(Stadium stadium) {
-        for (Session session : sessions.values()) {
+        for (Session session : all) {
             if (session.stadium == stadium) return true;
         }
         return false;
     }
 
     boolean ownsBall(Entity entity) {
-        for (Session session : sessions.values()) {
+        for (Session session : all) {
             if (session.ball != null && session.ball.equals(entity)) return true;
         }
         return false;
@@ -211,14 +240,14 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
 
     /** /match leave while training: the same as the red concrete. Returns false if the player wasn't training. */
     boolean leave(Player player) {
-        Session session = sessions.get(player.getUniqueId());
+        Session session = byPlayer.get(player.getUniqueId());
         if (session == null) return false;
-        stop(session, true);
+        leaveSession(session, player.getUniqueId());
         return true;
     }
 
     void shutdown() {
-        for (Session session : new ArrayList<>(sessions.values())) stop(session, true);
+        for (Session session : new ArrayList<>(all)) stop(session);
     }
 
     // ------------------------------------------------------------------ the command and its menus
@@ -230,7 +259,33 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
             return true;
         }
         UUID id = player.getUniqueId();
-        if (sessions.containsKey(id)) {
+        if (args.length >= 1) {
+            switch (args[0].toLowerCase()) {
+                case "invite" -> {
+                    if (args.length < 2) {
+                        error(player, "Usage: /training invite <player>");
+                        return true;
+                    }
+                    Player target = Bukkit.getPlayerExact(args[1]);
+                    if (target == null) error(player, args[1] + " isn't online.");
+                    else invite(player, target);
+                    return true;
+                }
+                case "accept" -> {
+                    accept(player);
+                    return true;
+                }
+                case "decline" -> {
+                    decline(player);
+                    return true;
+                }
+                default -> {
+                    error(player, "Usage: /training [invite <player>|accept|decline]");
+                    return true;
+                }
+            }
+        }
+        if (byPlayer.containsKey(id)) {
             error(player, "You are already training. Use the red concrete in your hotbar to stop.");
             return true;
         }
@@ -244,6 +299,13 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
 
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
+        if (args.length == 1) {
+            return List.of("invite", "accept", "decline").stream().filter(s -> s.startsWith(args[0].toLowerCase())).toList();
+        }
+        if (args.length == 2 && args[0].equalsIgnoreCase("invite")) {
+            return Bukkit.getOnlinePlayers().stream().map(Player::getName)
+                    .filter(n -> n.toLowerCase().startsWith(args[1].toLowerCase())).toList();
+        }
         return List.of();
     }
 
@@ -252,11 +314,13 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         Inventory inventory = newMenu(holder, "Training");
         inventory.setItem(SLOT_FREE_PLAY, button(Material.LEATHER_BOOTS, "Free Play", NamedTextColor.GOLD,
                 plain("A football to kick around for as long as you like,", NamedTextColor.GRAY),
-                plain("in the stadium of your choice.", NamedTextColor.GRAY),
+                plain("in the stadium of your choice. Goals count, and you", NamedTextColor.GRAY),
+                plain("can invite friends to play with you.", NamedTextColor.GRAY),
                 plain("Click to select", NamedTextColor.YELLOW)));
         inventory.setItem(SLOT_DODGE, button(Material.FEATHER, "Dodge", NamedTextColor.GOLD,
                 plain("Dribble to the goal past sliding obstacles.", NamedTextColor.GRAY),
-                plain("Touch one and it resets; score and you get a point.", NamedTextColor.GRAY),
+                plain("If you or the ball touch one it resets; score and", NamedTextColor.GRAY),
+                plain("you get a point.", NamedTextColor.GRAY),
                 plain("Click to select", NamedTextColor.YELLOW)));
         player.openInventory(inventory);
     }
@@ -277,7 +341,9 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
             if (index >= available.size()) break;
             Stadium stadium = available.get(index);
             boolean free = matches.stadiumFree(stadium);
-            ItemStack item = button(Material.GRASS_BLOCK, stadium.name, NamedTextColor.GOLD,
+            // The icon is the stadium's /stadium block, like in the match stadium menu.
+            ItemStack item = button(stadium.block != null ? stadium.block : Material.PLAYER_HEAD, stadium.name,
+                    NamedTextColor.GOLD,
                     free ? plain("Click to train here", NamedTextColor.YELLOW) : plain("In use right now", NamedTextColor.RED));
             ItemMeta meta = item.getItemMeta();
             meta.getPersistentDataContainer().set(itemKey, PersistentDataType.STRING, "stadium:" + stadium.name);
@@ -288,12 +354,50 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
             inventory.setItem(13, button(Material.BARRIER, "No stadiums yet", NamedTextColor.RED,
                     plain("An operator needs to finish a stadium first.", NamedTextColor.GRAY)));
         }
+        addPaging(inventory, pages);
+        player.openInventory(inventory);
+    }
+
+    /** The host's list of players to invite to their Free Play. */
+    private void openInviteMenu(Player host, int page) {
+        Session session = byPlayer.get(host.getUniqueId());
+        if (session == null || session.mode != Mode.FREE_PLAY || !host.getUniqueId().equals(session.owner)) return;
+
+        List<Player> candidates = new ArrayList<>();
+        for (Player other : Bukkit.getOnlinePlayers()) {
+            UUID id = other.getUniqueId();
+            if (id.equals(host.getUniqueId()) || byPlayer.containsKey(id) || matches.isInMatch(id) || matches.isWatching(id)) continue;
+            candidates.add(other);
+        }
+        int pages = Math.max(1, (candidates.size() + PAGE_SIZE - 1) / PAGE_SIZE);
+        page = Math.max(1, Math.min(page, pages));
+
+        Gui holder = new Gui(MenuType.INVITE, session.mode, page, pages);
+        Inventory inventory = newMenu(holder, "Invite to Free Play");
+        for (int i = 0; i < PAGE_SIZE; i++) {
+            int index = (page - 1) * PAGE_SIZE + i;
+            if (index >= candidates.size()) break;
+            Player other = candidates.get(index);
+            ItemStack head = new ItemStack(Material.PLAYER_HEAD);
+            SkullMeta meta = (SkullMeta) head.getItemMeta();
+            meta.setOwningPlayer(other);
+            meta.displayName(Component.text(other.getName(), NamedTextColor.GOLD, TextDecoration.BOLD)
+                    .decoration(TextDecoration.ITALIC, false));
+            meta.lore(List.of(plain("Click to invite", NamedTextColor.YELLOW)));
+            meta.getPersistentDataContainer().set(itemKey, PersistentDataType.STRING, "player:" + other.getUniqueId());
+            head.setItemMeta(meta);
+            inventory.setItem(i, head);
+        }
+        addPaging(inventory, pages);
+        host.openInventory(inventory);
+    }
+
+    private void addPaging(Inventory inventory, int pages) {
         if (pages > 1) {
             inventory.setItem(SLOT_PREVIOUS, button(Material.ARROW, "Previous Page", NamedTextColor.WHITE));
             inventory.setItem(SLOT_NEXT, button(Material.ARROW, "Next Page", NamedTextColor.WHITE));
         }
         inventory.setItem(SLOT_BACK, button(Material.OAK_DOOR, "Back", NamedTextColor.DARK_BLUE));
-        player.openInventory(inventory);
     }
 
     @EventHandler
@@ -311,21 +415,38 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         if (slot == SLOT_BACK) {
-            later(() -> openModeMenu(player));
+            later(() -> {
+                if (menu.type == MenuType.INVITE) player.closeInventory();
+                else openModeMenu(player);
+            });
         } else if (slot == SLOT_PREVIOUS || slot == SLOT_NEXT) {
             int target = menu.page + (slot == SLOT_NEXT ? 1 : -1);
-            if (target >= 1 && target <= menu.pages) later(() -> openStadiumMenu(player, menu.mode, target));
+            if (target >= 1 && target <= menu.pages) {
+                later(() -> {
+                    if (menu.type == MenuType.INVITE) openInviteMenu(player, target);
+                    else openStadiumMenu(player, menu.mode, target);
+                });
+            }
         } else if (slot < PAGE_SIZE) {
             ItemStack clicked = event.getCurrentItem();
             if (clicked == null || !clicked.hasItemMeta()) return;
             String key = clicked.getItemMeta().getPersistentDataContainer().get(itemKey, PersistentDataType.STRING);
-            if (key == null || !key.startsWith("stadium:")) return;
-            Stadium stadium = stadiums.get(key.substring("stadium:".length()));
-            later(() -> {
-                player.closeInventory();
-                if (stadium == null) error(player, "That stadium no longer exists.");
-                else begin(player, menu.mode, stadium);
-            });
+            if (key == null) return;
+            if (menu.type == MenuType.STADIUMS && key.startsWith("stadium:")) {
+                Stadium stadium = stadiums.get(key.substring("stadium:".length()));
+                later(() -> {
+                    player.closeInventory();
+                    if (stadium == null) error(player, "That stadium no longer exists.");
+                    else begin(player, menu.mode, stadium);
+                });
+            } else if (menu.type == MenuType.INVITE && key.startsWith("player:")) {
+                Player target = Bukkit.getPlayer(UUID.fromString(key.substring("player:".length())));
+                later(() -> {
+                    player.closeInventory();
+                    if (target == null) error(player, "That player is no longer online.");
+                    else invite(player, target);
+                });
+            }
         }
     }
 
@@ -333,7 +454,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
 
     private void begin(Player player, Mode mode, Stadium stadium) {
         UUID id = player.getUniqueId();
-        if (sessions.containsKey(id) || matches.isInMatch(id) || matches.isWatching(id)) {
+        if (byPlayer.containsKey(id) || matches.isInMatch(id) || matches.isWatching(id)) {
             error(player, "You can't start training right now.");
             return;
         }
@@ -346,28 +467,16 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
 
-        ItemStack savedStart = player.getInventory().getItem(HOTBAR_START);
-        ItemStack savedStop = player.getInventory().getItem(HOTBAR_STOP);
-        Session session = new Session(id, mode, stadium, player.getLocation().clone(), player.getGameMode(),
-                savedStart == null ? null : savedStart.clone(), savedStop == null ? null : savedStop.clone());
-        sessions.put(id, session);
-
+        Session session = new Session(id, mode, stadium);
+        all.add(session);
         Location spot = stadium.center.clone();
         if (mode == Mode.DODGE) {
             prepareDodge(session);
             spot = session.start.clone();
         } else {
-            Location toGoal = goalCentre(stadium);
-            if (toGoal != null) {
-                Vector direction = toGoal.toVector().subtract(spot.toVector()).setY(0);
-                if (direction.lengthSquared() > 1.0E-4) spot.setDirection(direction);
-            }
+            faceGoal(stadium, spot);
         }
-        player.teleport(spot);
-        player.setGameMode(GameMode.ADVENTURE);
-        player.getInventory().setItem(HOTBAR_START, createItem(true));
-        player.getInventory().setItem(HOTBAR_STOP, createItem(false));
-        player.showBossBar(session.bar);
+        addMember(session, player, spot, true);
         updateBar(session);
 
         player.sendMessage(Component.text((mode == Mode.FREE_PLAY ? "Free Play" : "Dodge") + " on " + stadium.name
@@ -375,13 +484,89 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
                 .append(Component.text("lime concrete", NamedTextColor.GREEN, TextDecoration.BOLD))
                 .append(Component.text(" to start and the ", NamedTextColor.GREEN))
                 .append(Component.text("red concrete", NamedTextColor.RED, TextDecoration.BOLD))
-                .append(Component.text(" to stop.", NamedTextColor.GREEN)));
+                .append(Component.text(" to stop." + (mode == Mode.FREE_PLAY
+                        ? " The diamond invites friends." : ""), NamedTextColor.GREEN)));
         session.task = Bukkit.getScheduler().runTaskTimer(plugin, () -> tick(session), 1L, 1L);
+    }
+
+    /** Puts a player into a session: their hotbar items, adventure mode and the bar, and where they stand. */
+    private void addMember(Session session, Player player, Location spot, boolean host) {
+        UUID id = player.getUniqueId();
+        boolean inviteSlot = host && session.mode == Mode.FREE_PLAY;
+        ItemStack savedStart = player.getInventory().getItem(HOTBAR_START);
+        ItemStack savedInvite = player.getInventory().getItem(HOTBAR_INVITE);
+        ItemStack savedStop = player.getInventory().getItem(HOTBAR_STOP);
+        session.members.put(id, new Member(player.getLocation().clone(), player.getGameMode(),
+                savedStart == null ? null : savedStart.clone(), savedInvite == null ? null : savedInvite.clone(),
+                savedStop == null ? null : savedStop.clone(), inviteSlot));
+        byPlayer.put(id, session);
+
+        player.teleport(spot);
+        player.setGameMode(GameMode.ADVENTURE);
+        player.getInventory().setItem(HOTBAR_START, createItem("start"));
+        if (inviteSlot) player.getInventory().setItem(HOTBAR_INVITE, createItem("invite"));
+        player.getInventory().setItem(HOTBAR_STOP, createItem("stop"));
+        player.showBossBar(session.bar);
+    }
+
+    /** Takes a player out of a session and gives back everything of theirs. */
+    private void removeMember(Session session, UUID id, boolean home) {
+        Member member = session.members.remove(id);
+        byPlayer.remove(id);
+        Player player = Bukkit.getPlayer(id);
+        if (member == null || player == null) return;
+        player.hideBossBar(session.bar);
+        player.getInventory().setItem(HOTBAR_START, member.savedStart);
+        if (member.usesInviteSlot) player.getInventory().setItem(HOTBAR_INVITE, member.savedInvite);
+        player.getInventory().setItem(HOTBAR_STOP, member.savedStop);
+        player.setGameMode(member.savedMode);
+        if (home) player.teleport(member.origin);
+    }
+
+    /** The red concrete: a guest leaves; if the host leaves, the whole session ends. */
+    private void leaveSession(Session session, UUID id) {
+        if (id.equals(session.owner)) {
+            stop(session);
+            return;
+        }
+        Player leaver = Bukkit.getPlayer(id);
+        removeMember(session, id, true);
+        if (leaver != null) {
+            leaver.sendMessage(Component.text("You left Free Play.", NamedTextColor.YELLOW));
+            for (UUID other : session.members.keySet()) {
+                Player p = Bukkit.getPlayer(other);
+                if (p != null) p.sendMessage(Component.text(leaver.getName() + " left.", NamedTextColor.YELLOW));
+            }
+        }
+        if (session.members.isEmpty()) stop(session);
+    }
+
+    /** Ends the session for everyone in it. */
+    private void stop(Session session) {
+        all.remove(session);
+        if (session.task != null) session.task.cancel();
+        removeBall(session);
+        removeObstacles(session);
+        for (UUID id : new ArrayList<>(session.members.keySet())) {
+            Player p = Bukkit.getPlayer(id);
+            removeMember(session, id, true);
+            if (p == null) continue;
+            if (session.mode == Mode.DODGE) {
+                p.sendMessage(Component.text("Dodge finished: " + session.points + " point" + (session.points == 1 ? "" : "s")
+                        + ", " + session.hits + " hit" + (session.hits == 1 ? "" : "s") + ".", NamedTextColor.GOLD));
+            } else if (session.redScore + session.blueScore > 0) {
+                p.sendMessage(Component.text("Free Play over. Final score: Red " + session.redScore + " - "
+                        + session.blueScore + " Blue.", NamedTextColor.GOLD));
+            } else {
+                p.sendMessage(Component.text("Training stopped.", NamedTextColor.YELLOW));
+            }
+        }
     }
 
     /** The lime concrete: puts the ball down (and, in Dodge, a fresh run with its obstacles). */
     private void startRun(Session session, Player player) {
         session.running = true;
+        session.ballWait = 0;
         if (session.mode == Mode.DODGE) {
             resetRun(session, player);
         } else {
@@ -389,47 +574,107 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
             session.ball = spawnBall(session, freePlayBallSpot(session, player));
         }
         updateBar(session);
-        player.sendActionBar(Component.text(session.mode == Mode.FREE_PLAY ? "Free Play started" : "Run started - go!",
+        player.sendActionBar(Component.text(session.mode == Mode.FREE_PLAY ? "Ball down!" : "Run started - go!",
                 NamedTextColor.GREEN, TextDecoration.BOLD));
-    }
-
-    /** The red concrete: ends the training and puts everything back. */
-    private void stop(Session session, boolean home) {
-        sessions.remove(session.player);
-        if (session.task != null) session.task.cancel();
-        removeBall(session);
-        removeObstacles(session);
-
-        Player player = Bukkit.getPlayer(session.player);
-        if (player == null) return;
-        player.hideBossBar(session.bar);
-        player.getInventory().setItem(HOTBAR_START, session.savedStart);
-        player.getInventory().setItem(HOTBAR_STOP, session.savedStop);
-        player.setGameMode(session.savedMode);
-        if (home) player.teleport(session.origin);
-        if (session.mode == Mode.DODGE) {
-            player.sendMessage(Component.text("Dodge finished: " + session.points + " point" + (session.points == 1 ? "" : "s")
-                    + ", " + session.hits + " hit" + (session.hits == 1 ? "" : "s") + ".", NamedTextColor.GOLD));
-        } else {
-            player.sendMessage(Component.text("Training stopped.", NamedTextColor.YELLOW));
-        }
     }
 
     @EventHandler
     public void onQuit(PlayerQuitEvent event) {
-        Session session = sessions.get(event.getPlayer().getUniqueId());
-        if (session != null) stop(session, true);
+        Session session = byPlayer.get(event.getPlayer().getUniqueId());
+        if (session != null) leaveSession(session, event.getPlayer().getUniqueId());
+        invites.remove(event.getPlayer().getUniqueId());
+    }
+
+    // ------------------------------------------------------------------ inviting friends to Free Play
+
+    private void invite(Player host, Player target) {
+        Session session = byPlayer.get(host.getUniqueId());
+        if (session == null || session.mode != Mode.FREE_PLAY || !host.getUniqueId().equals(session.owner)) {
+            error(host, "Only the host of a Free Play can invite players.");
+            return;
+        }
+        UUID id = target.getUniqueId();
+        if (id.equals(host.getUniqueId())) {
+            error(host, "You can't invite yourself.");
+            return;
+        }
+        if (byPlayer.containsKey(id) || matches.isInMatch(id) || matches.isWatching(id)) {
+            error(host, target.getName() + " is busy right now.");
+            return;
+        }
+        if (session.members.size() >= MAX_MEMBERS) {
+            error(host, "Free Play can have at most " + MAX_MEMBERS + " players.");
+            return;
+        }
+
+        invites.put(id, new Invite(session, System.currentTimeMillis()));
+        target.sendMessage(Component.text(host.getName(), NamedTextColor.YELLOW)
+                .append(Component.text(" invited you to Free Play on " + session.stadium.name + ". ", NamedTextColor.GRAY))
+                .append(Component.text("[Accept]", NamedTextColor.GREEN, TextDecoration.BOLD)
+                        .clickEvent(ClickEvent.runCommand("/training accept")))
+                .append(Component.text(" "))
+                .append(Component.text("[Decline]", NamedTextColor.RED, TextDecoration.BOLD)
+                        .clickEvent(ClickEvent.runCommand("/training decline"))));
+        host.sendMessage(Component.text("Invited " + target.getName() + " to your Free Play.", NamedTextColor.GREEN));
+    }
+
+    private void accept(Player player) {
+        UUID id = player.getUniqueId();
+        Invite invite = invites.remove(id);
+        if (invite == null || System.currentTimeMillis() - invite.time() > INVITE_MILLIS || !all.contains(invite.session())) {
+            error(player, "You have no Free Play invitation (it may have expired or ended).");
+            return;
+        }
+        Session session = invite.session();
+        if (byPlayer.containsKey(id) || matches.isInMatch(id) || matches.isWatching(id)) {
+            error(player, "Leave what you are doing first.");
+            return;
+        }
+        if (session.members.size() >= MAX_MEMBERS) {
+            error(player, "That Free Play is full.");
+            return;
+        }
+
+        Location spot = session.stadium.center.clone();
+        faceGoal(session.stadium, spot);
+        addMember(session, player, spot, false);
+        String name = player.getName();
+        for (UUID other : session.members.keySet()) {
+            Player p = Bukkit.getPlayer(other);
+            if (p == null) continue;
+            if (other.equals(id)) {
+                p.sendMessage(Component.text("You joined Free Play on " + session.stadium.name + ". Right-click the red concrete "
+                        + "to leave.", NamedTextColor.GREEN));
+            } else {
+                p.sendMessage(Component.text(name + " joined.", NamedTextColor.GREEN));
+            }
+        }
+    }
+
+    private void decline(Player player) {
+        Invite invite = invites.remove(player.getUniqueId());
+        if (invite == null) {
+            error(player, "You have no Free Play invitation.");
+            return;
+        }
+        player.sendMessage(Component.text("Invitation declined.", NamedTextColor.YELLOW));
+        Player host = Bukkit.getPlayer(invite.session().owner);
+        if (host != null) host.sendMessage(Component.text(player.getName() + " declined your invitation.", NamedTextColor.YELLOW));
     }
 
     // ------------------------------------------------------------------ the hotbar items
 
-    private ItemStack createItem(boolean start) {
-        ItemStack item = button(start ? Material.LIME_CONCRETE : Material.RED_CONCRETE, start ? "Start" : "Stop",
-                start ? NamedTextColor.GREEN : NamedTextColor.RED,
-                plain(start ? "Right-click to put the ball down and start." : "Right-click to stop training and go back.",
-                        NamedTextColor.GRAY));
+    private ItemStack createItem(String action) {
+        ItemStack item = switch (action) {
+            case "start" -> button(Material.LIME_CONCRETE, "Start", NamedTextColor.GREEN,
+                    plain("Right-click to put the ball down and start.", NamedTextColor.GRAY));
+            case "invite" -> button(Material.DIAMOND, "Invite Players", NamedTextColor.AQUA,
+                    plain("Right-click to invite friends to your Free Play.", NamedTextColor.GRAY));
+            default -> button(Material.RED_CONCRETE, "Stop", NamedTextColor.RED,
+                    plain("Right-click to stop training and go back.", NamedTextColor.GRAY));
+        };
         ItemMeta meta = item.getItemMeta();
-        meta.getPersistentDataContainer().set(itemKey, PersistentDataType.STRING, start ? "start" : "stop");
+        meta.getPersistentDataContainer().set(itemKey, PersistentDataType.STRING, action);
         item.setItemMeta(meta);
         return item;
     }
@@ -437,7 +682,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
     private String itemAction(ItemStack item) {
         if (item == null || !item.hasItemMeta()) return null;
         String value = item.getItemMeta().getPersistentDataContainer().get(itemKey, PersistentDataType.STRING);
-        return "start".equals(value) || "stop".equals(value) ? value : null;
+        return "start".equals(value) || "stop".equals(value) || "invite".equals(value) ? value : null;
     }
 
     @EventHandler
@@ -449,20 +694,23 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         event.setCancelled(true); // the concrete is never placed
 
         Player player = event.getPlayer();
-        Session session = sessions.get(player.getUniqueId());
+        Session session = byPlayer.get(player.getUniqueId());
         if (session == null) {
             player.getInventory().setItem(event.getHand(), null); // a left-over item from a session that is long gone
             return;
         }
-        if (action.equals("stop")) stop(session, true);
-        else startRun(session, player);
+        switch (action) {
+            case "stop" -> leaveSession(session, player.getUniqueId());
+            case "invite" -> openInviteMenu(player, 1);
+            default -> startRun(session, player);
+        }
     }
 
-    /** The two items stay where they are for as long as the session lasts. */
+    /** The items stay where they are for as long as the session lasts. */
     @EventHandler
     public void onItemMove(InventoryClickEvent event) {
         if (event.getInventory().getHolder() instanceof Gui) return;
-        if (!(event.getWhoClicked() instanceof Player player) || !sessions.containsKey(player.getUniqueId())) return;
+        if (!(event.getWhoClicked() instanceof Player player) || !byPlayer.containsKey(player.getUniqueId())) return;
         if (itemAction(event.getCurrentItem()) != null || itemAction(event.getCursor()) != null) event.setCancelled(true);
     }
 
@@ -478,7 +726,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
 
     @EventHandler
     public void onDamage(EntityDamageEvent event) {
-        if (event.getEntity() instanceof Player player && sessions.containsKey(player.getUniqueId())) event.setCancelled(true);
+        if (event.getEntity() instanceof Player player && byPlayer.containsKey(player.getUniqueId())) event.setCancelled(true);
     }
 
     // ------------------------------------------------------------------ the ball
@@ -508,23 +756,32 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
 
     /** Called by the match code when a player punches a ball: an ordinary football kick. */
     void onHit(Player kicker, Entity entity, Vector velocity) {
-        Session session = sessions.get(kicker.getUniqueId());
+        Session session = byPlayer.get(kicker.getUniqueId());
         if (session == null || !session.running || session.ball == null || !session.ball.equals(entity)) return;
-        if (session.tick - session.lastHit < HIT_COOLDOWN_TICKS) return; // one swing, one hit
-        session.lastHit = session.tick;
+        Member member = session.members.get(kicker.getUniqueId());
+        if (member == null || session.tick - member.lastHit < HIT_COOLDOWN_TICKS) return; // one swing, one hit
+        member.lastHit = session.tick;
+        session.lastKicker = kicker.getUniqueId();
         entity.setVelocity(velocity);
     }
 
     // ------------------------------------------------------------------ the loop
 
     private void tick(Session session) {
-        Player player = Bukkit.getPlayer(session.player);
-        if (player == null || !player.isOnline()) {
-            stop(session, false);
+        Player owner = Bukkit.getPlayer(session.owner);
+        if (owner == null || !owner.isOnline()) {
+            stop(session);
             return;
         }
         session.tick++;
         if (!session.running) return;
+
+        if (session.mode == Mode.FREE_PLAY) {
+            if (session.ballWait > 0) { // a goal was just scored: the ball comes back in a moment
+                if (--session.ballWait == 0) session.ball = spawnBall(session, session.stadium.center.clone());
+                return;
+            }
+        }
 
         if (session.ball == null || session.ball.isDead()) { // replaced only when it is really gone
             removeBall(session);
@@ -533,39 +790,72 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
 
         if (session.mode == Mode.DODGE) {
             moveObstacles(session);
-            for (Obstacle obstacle : session.obstacles) collideBall(session, obstacle);
-            if (hitByObstacle(session, player)) {
+            String hitBy = obstacleHit(session, owner);
+            if (hitBy != null) {
                 session.hits++;
-                player.showTitle(Title.title(Component.text("Hit!", NamedTextColor.RED, TextDecoration.BOLD),
-                        Component.text("You touched an obstacle", NamedTextColor.GRAY),
+                owner.showTitle(Title.title(Component.text("Hit!", NamedTextColor.RED, TextDecoration.BOLD),
+                        Component.text(hitBy, NamedTextColor.GRAY),
                         Title.Times.times(Duration.ZERO, Duration.ofMillis(1200), Duration.ofMillis(300))));
-                player.playSound(player.getLocation(), "entity.player.hurt", 1.0f, 1.0f);
-                resetRun(session, player);
+                owner.playSound(owner.getLocation(), "entity.player.hurt", 1.0f, 1.0f);
+                resetRun(session, owner);
                 updateBar(session);
                 return;
             }
             Location ballCentre = session.ball.getBoundingBox().getCenter().toLocation(session.world);
             if (session.stadium.goalContains(Match.Team.BLUE, ballCentre)) {
                 session.points++;
-                player.showTitle(Title.title(Component.text("Point!", NamedTextColor.GREEN, TextDecoration.BOLD),
+                owner.showTitle(Title.title(Component.text("Point!", NamedTextColor.GREEN, TextDecoration.BOLD),
                         Component.text(session.points + " point" + (session.points == 1 ? "" : "s"), NamedTextColor.GRAY),
                         Title.Times.times(Duration.ZERO, Duration.ofMillis(1500), Duration.ofMillis(300))));
-                player.playSound(player.getLocation(), "entity.player.levelup", 1.0f, 1.2f);
-                resetRun(session, player);
+                owner.playSound(owner.getLocation(), "entity.player.levelup", 1.0f, 1.2f);
+                resetRun(session, owner);
                 updateBar(session);
                 return;
             }
         }
         checkBounds(session);
+
+        if (session.mode == Mode.FREE_PLAY && session.ball != null) {
+            // Goals count as in a normal match: the ball in the goal a team defends is a goal for the other team.
+            Location centre = session.ball.getBoundingBox().getCenter().toLocation(session.world);
+            if (session.stadium.goalContains(Match.Team.RED, centre)) goalScored(session, Match.Team.BLUE);
+            else if (session.stadium.goalContains(Match.Team.BLUE, centre)) goalScored(session, Match.Team.RED);
+        }
+    }
+
+    /** Free Play goal: the score goes up, everyone sees it, and the ball comes back in the middle after 3 seconds. */
+    private void goalScored(Session session, Match.Team scorer) {
+        if (scorer == Match.Team.RED) session.redScore++;
+        else session.blueScore++;
+        removeBall(session);
+        session.ballWait = GOAL_PAUSE_TICKS;
+
+        String by = session.lastKicker == null ? null : Bukkit.getOfflinePlayer(session.lastKicker).getName();
+        Title title = Title.title(Component.text("GOAL!", scorer.color, TextDecoration.BOLD),
+                Component.text((by == null ? "" : "Scored by " + by + "  ") + "Red " + session.redScore + " - "
+                        + session.blueScore + " Blue", NamedTextColor.WHITE),
+                Title.Times.times(Duration.ofMillis(100), Duration.ofSeconds(2), Duration.ofMillis(400)));
+        for (UUID id : session.members.keySet()) {
+            Player p = Bukkit.getPlayer(id);
+            if (p == null) continue;
+            p.showTitle(title);
+            p.playSound(p.getLocation(), "entity.player.levelup", 1.0f, 1.0f);
+        }
+        session.lastKicker = null;
+        updateBar(session);
     }
 
     private void updateBar(Session session) {
         if (session.mode == Mode.DODGE) {
             session.bar.name(Component.text("Dodge - Points: " + session.points + "  |  Hits: " + session.hits,
                     NamedTextColor.GREEN, TextDecoration.BOLD));
+        } else if (!session.running) {
+            session.bar.name(Component.text("Free Play - right-click the lime concrete to start", NamedTextColor.GREEN,
+                    TextDecoration.BOLD));
         } else {
-            session.bar.name(Component.text("Free Play - " + (session.running ? "right-click the red concrete to stop"
-                    : "right-click the lime concrete to start"), NamedTextColor.GREEN, TextDecoration.BOLD));
+            session.bar.name(Component.text("Red " + session.redScore, NamedTextColor.RED, TextDecoration.BOLD)
+                    .append(Component.text("  -  ", NamedTextColor.GRAY))
+                    .append(Component.text(session.blueScore + " Blue", NamedTextColor.BLUE, TextDecoration.BOLD)));
         }
     }
 
@@ -625,22 +915,27 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         cube.teleport(target);
         cube.setVelocity(bounced);
         session.lastVelocity = bounced.clone();
-        Player player = Bukkit.getPlayer(session.player);
-        if (player != null) player.sendActionBar(Component.text("Out of bounds!", NamedTextColor.YELLOW, TextDecoration.BOLD));
+        for (UUID id : session.members.keySet()) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) p.sendActionBar(Component.text("Out of bounds!", NamedTextColor.YELLOW, TextDecoration.BOLD));
+        }
     }
 
     private void returnBall(Session session, String what) {
         if (session.ball == null || session.tick - session.lastReset < OUT_RESET_COOLDOWN_TICKS) return;
         session.lastReset = session.tick;
-        Player player = Bukkit.getPlayer(session.player);
+        Player owner = Bukkit.getPlayer(session.owner);
         if (session.mode == Mode.DODGE) {
-            if (player != null) resetRun(session, player);
+            if (owner != null) resetRun(session, owner);
         } else {
             session.ball.teleport(session.stadium.center.clone());
             session.ball.setVelocity(new Vector(0, 0, 0));
             session.lastVelocity = null;
         }
-        if (player != null) player.sendActionBar(Component.text("The ball " + what + ".", NamedTextColor.YELLOW));
+        for (UUID id : session.members.keySet()) {
+            Player p = Bukkit.getPlayer(id);
+            if (p != null) p.sendActionBar(Component.text("The ball " + what + ".", NamedTextColor.YELLOW));
+        }
     }
 
     // ------------------------------------------------------------------ Dodge
@@ -661,6 +956,13 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         return n == 0 ? null : new Location(stadium.center.getWorld(), x / n, stadium.center.getY(), z / n);
     }
 
+    private void faceGoal(Stadium stadium, Location spot) {
+        Location goal = goalCentre(stadium);
+        if (goal == null) return;
+        Vector direction = goal.toVector().subtract(spot.toVector()).setY(0);
+        if (direction.lengthSquared() > 1.0E-4) spot.setDirection(direction);
+    }
+
     /** Works out where the run starts and builds the obstacles between there and the goal. */
     private void prepareDodge(Session session) {
         Stadium stadium = session.stadium;
@@ -677,8 +979,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         Location start = centre.clone().subtract(forward.clone().multiply(halfLength * 0.35));
         if (!inside(stadium, start.getX(), start.getZ())) start = centre.clone();
         start.setDirection(forward);
-        double length = Math.max(8.0, halfLength + start.toVector().subtract(centre.toVector()).length()
-                * (start.equals(centre) ? 0 : 1)); // distance from the start to the goal, roughly
+        double length = Math.max(8.0, halfLength + start.toVector().subtract(centre.toVector()).length()); // start to goal
         session.start = start;
         session.forward = forward;
 
@@ -741,47 +1042,23 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         }
     }
 
-    private boolean hitByObstacle(Session session, Player player) {
-        BoundingBox body = player.getBoundingBox().expand(0.05);
+    /**
+     * Whether the player or the ball is touching an obstacle: returns what to tell the player ("You touched an
+     * obstacle" / "The ball touched an obstacle"), or null if neither is. The block is drawn a tick or two behind where
+     * it really is (it glides to each new spot), so where it was recently counts too, and the hit box is taller than the
+     * block, so a slope or a jump can't get past it.
+     */
+    private String obstacleHit(Session session, Player player) {
+        BoundingBox body = player.getBoundingBox().expand(0.1);
+        BoundingBox ball = session.ball == null ? null : session.ball.getBoundingBox().expand(0.05);
         for (Obstacle obstacle : session.obstacles) {
-            if (obstacle.box(session.tick).overlaps(body)) return true;
+            for (int back = 0; back <= 2; back++) {
+                BoundingBox hitBox = obstacle.hitBox(session.tick - back);
+                if (hitBox.overlaps(body)) return "You touched an obstacle";
+                if (ball != null && hitBox.overlaps(ball)) return "The ball touched an obstacle";
+            }
         }
-        return false;
-    }
-
-    /** The ball is solid to the obstacles: it is pushed out of one and bounces off it. */
-    private void collideBall(Session session, Obstacle obstacle) {
-        SulfurCube ball = session.ball;
-        if (ball == null) return;
-        BoundingBox b = ball.getBoundingBox();
-        BoundingBox o = obstacle.box(session.tick);
-        if (!o.overlaps(b)) return;
-
-        double toPlusX = o.getMaxX() - b.getMinX();
-        double toMinusX = b.getMaxX() - o.getMinX();
-        double toPlusZ = o.getMaxZ() - b.getMinZ();
-        double toMinusZ = b.getMaxZ() - o.getMinZ();
-        double least = Math.min(Math.min(toPlusX, toMinusX), Math.min(toPlusZ, toMinusZ));
-
-        Vector v = ball.getVelocity();
-        double dx = 0;
-        double dz = 0;
-        if (least == toPlusX) {
-            dx = toPlusX + 0.05;
-            v.setX(Math.abs(v.getX()) * 0.8 + 0.15);
-        } else if (least == toMinusX) {
-            dx = -(toMinusX + 0.05);
-            v.setX(-Math.abs(v.getX()) * 0.8 - 0.15);
-        } else if (least == toPlusZ) {
-            dz = toPlusZ + 0.05;
-            v.setZ(Math.abs(v.getZ()) * 0.8 + 0.15);
-        } else {
-            dz = -(toMinusZ + 0.05);
-            v.setZ(-Math.abs(v.getZ()) * 0.8 - 0.15);
-        }
-        ball.teleport(ball.getLocation().add(dx, 0, dz));
-        ball.setVelocity(v);
-        session.world.playSound(ball.getLocation(), "block.stone.hit", 1.0f, 1.2f);
+        return null;
     }
 
     // ------------------------------------------------------------------ small helpers
