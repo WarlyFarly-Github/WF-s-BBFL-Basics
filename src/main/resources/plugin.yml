@@ -30,6 +30,9 @@ commands:
   challenge:
     description: Open the challenge menu (Duels, Smash, One-Bounce, Color Cover).
     usage: /challenge [accept|decline|start|bypass]
+  training:
+    description: Open the training menu (Free Play and Dodge) to practise on your own.
+    usage: /training
   obstadium:
     description: Create and edit One-Bounce stadiums (operators only).
     usage: /obstadium <create|delete|list|info|setballpos|setradius|bounds|edit|confirm>

@@ -119,6 +119,15 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
         matches.setHotPotato(hotPotato);
         getServer().getPluginManager().registerEvents(hotPotato, this);
 
+        TrainingManager training = new TrainingManager(this, matches, stadiums);
+        PluginCommand trainingCommand = getCommand("training");
+        if (trainingCommand != null) {
+            trainingCommand.setExecutor(training);
+            trainingCommand.setTabCompleter(training);
+        }
+        matches.setTraining(training);
+        getServer().getPluginManager().registerEvents(training, this);
+
         RouletteManager roulette = new RouletteManager(this, matches);
         matches.setRoulette(roulette);
         getServer().getPluginManager().registerEvents(roulette, this);

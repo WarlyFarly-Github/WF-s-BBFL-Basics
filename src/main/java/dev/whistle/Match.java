@@ -40,7 +40,7 @@ final class Match {
 
     enum Phase { FIRST_HALF, SECOND_HALF, COUNTDOWN }
 
-    enum CountdownType { START, HALF_TIME, GOAL }
+    enum CountdownType { START, HALF_TIME, GOAL, GOLDEN_GOAL }
 
     final UUID host; // null for quickmatches, which have no host
     boolean quick;   // quickmatch: one period, no half time
@@ -94,6 +94,7 @@ final class Match {
     Phase phase = Phase.FIRST_HALF;          // COUNTDOWN means everything is frozen
     Phase resumePhase = Phase.FIRST_HALF;    // the half to carry on with after a countdown
     CountdownType countdownType = CountdownType.START;
+    boolean goldenGoal;                      // level at full time: a 5 minute period where the next goal wins
     int secondsLeft;                         // play time left in the current half (paused during countdowns)
     int countdownLeft;                       // seconds left in the current freeze
     BukkitTask timerTask;                    // ticks the half timer

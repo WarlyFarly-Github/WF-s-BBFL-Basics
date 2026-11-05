@@ -74,6 +74,7 @@ import java.util.function.Supplier;
 final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private static final long INVITE_TIMEOUT_MS = 60_000;
+    private static final int GOLDEN_GOAL_SECONDS = 5 * 60; // the extra period after a draw: the next goal wins
     private static final int COUNTDOWN_SECONDS = 5;   // length of every freeze (start and after a goal)
     // Limits for the timings menu (Match Setup > clock).
     private static final int MIN_MATCH_MINUTES = 2;        // total match length: 2, 4, 6 ... minutes (split into two halves)
@@ -201,6 +202,17 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.colorCover = colorCover;
     }
 
+    private TrainingManager training;
+
+    void setTraining(TrainingManager training) {
+        this.training = training;
+    }
+
+    /** True if nothing is using this stadium: no match, no quickmatch lobby that reserved it, no training session. */
+    boolean stadiumFree(Stadium stadium) {
+        return !stadiumInUse(stadium) && (quick == null || !quick.isReserved(stadium));
+    }
+
     private RouletteManager roulette;
 
     void setRoulette(RouletteManager roulette) {
@@ -288,7 +300,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 || (smash != null && smash.ownsBall(ball))
                 || (oneBounce != null && oneBounce.ownsBall(ball))
                 || (colorCover != null && colorCover.ownsBall(ball))
-                || (hotPotato != null && hotPotato.ownsBall(ball));
+                || (hotPotato != null && hotPotato.ownsBall(ball))
+                || (training != null && training.ownsBall(ball));
     }
 
     /** Removes any of our balls near this spot that no game is using, before a fresh one is spawned there. */
@@ -314,6 +327,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (colorCover != null) colorCover.shutdown();
         if (hotPotato != null) hotPotato.shutdown();
         if (roulette != null) roulette.shutdown();
+        if (training != null) training.shutdown();
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
             m.onlineAudience().forEach(p -> restoreChestplate(m, p));
@@ -443,7 +457,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (isWatching(host.getUniqueId()) || (smash != null && smash.isPlaying(host.getUniqueId()))
                 || (oneBounce != null && oneBounce.isPlaying(host.getUniqueId()))
                 || (colorCover != null && colorCover.isPlaying(host.getUniqueId()))
-                || (hotPotato != null && hotPotato.isPlaying(host.getUniqueId()))) {
+                || (hotPotato != null && hotPotato.isPlaying(host.getUniqueId()))
+                || (training != null && training.isTraining(host.getUniqueId()))) {
             error(host, "You are watching or playing something. Use /match leave first.");
             return;
         }
@@ -534,12 +549,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return matchByPlayer.containsKey(id) || (smash != null && smash.isPlaying(id))
                 || (oneBounce != null && oneBounce.isPlaying(id))
                 || (colorCover != null && colorCover.isPlaying(id))
-                || (hotPotato != null && hotPotato.isPlaying(id));
+                || (hotPotato != null && hotPotato.isPlaying(id))
+                || (training != null && training.isTraining(id));
     }
 
     /** True if a running match is being played on this stadium. */
     boolean stadiumInUse(Stadium stadium) {
-        return matchByPlayer.values().stream().anyMatch(m -> m.started && m.stadium == stadium);
+        return matchByPlayer.values().stream().anyMatch(m -> m.started && m.stadium == stadium)
+                || (training != null && training.isUsing(stadium));
     }
 
     /**
@@ -751,6 +768,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             p.showTitle(title);
         }
 
+        if (match.goldenGoal) { // the golden goal wins the match on the spot
+            endMatch(match, "Golden goal! " + (match.redScore > match.blueScore ? "Red" : "Blue") + " team wins!");
+            return;
+        }
         beginCountdown(match, Match.CountdownType.GOAL, match.phase);
     }
 
@@ -885,6 +906,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (oneBounce != null && oneBounce.leave(player)) return; // playing One-Bounce
         if (colorCover != null && colorCover.leave(player)) return; // playing Color Cover
         if (hotPotato != null && hotPotato.leave(player)) return; // playing Hot Potato
+        if (training != null && training.leave(player)) return; // training
         Match match = matchByPlayer.get(player.getUniqueId());
         if (match == null) {
             error(player, "You are not in a match.");
@@ -1731,6 +1753,16 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
 
+        if (training != null && training.ownsBall(event.getEntity())) {
+            // Training: an ordinary football kick on the player's own ball.
+            if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker
+                    && byEntity.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK
+                    && !isWatching(kicker.getUniqueId())) {
+                training.onHit(kicker, event.getEntity(), kickVelocity(kicker));
+            }
+            return;
+        }
+
         if (hotPotato != null && hotPotato.ownsBall(event.getEntity())) {
             // Hot Potato: a normal football kick on a bomb that blows up near whoever it is closest to.
             if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker
@@ -1800,9 +1832,22 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (!match.quick && match.phase == Match.Phase.FIRST_HALF) {
             match.secondsLeft = match.playSeconds;
             beginCountdown(match, Match.CountdownType.HALF_TIME, Match.Phase.SECOND_HALF);
+        } else if (!match.goldenGoal && match.redScore == match.blueScore) {
+            beginGoldenGoal(match); // level at full time: five more minutes, and the next goal wins
+        } else if (match.goldenGoal) {
+            endMatch(match, "Full time! Nobody scored in the golden goal period.");
         } else {
             endMatch(match, "Full time!");
         }
+    }
+
+    /** Full time and the score is level: a 5 minute golden goal period, where the first goal wins the match. */
+    private void beginGoldenGoal(Match match) {
+        match.goldenGoal = true;
+        match.secondsLeft = GOLDEN_GOAL_SECONDS;
+        match.broadcast(Component.text("Full time, and it's level! Golden goal: the next goal wins the match.",
+                NamedTextColor.GOLD, TextDecoration.BOLD));
+        beginCountdown(match, Match.CountdownType.GOLDEN_GOAL, match.phase);
     }
 
     /**
@@ -1925,6 +1970,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case START -> Component.text("First half", NamedTextColor.GRAY);
             case HALF_TIME -> Component.text("Second half", NamedTextColor.GRAY);
             case GOAL -> Component.empty();
+            case GOLDEN_GOAL -> Component.text("Golden goal: the next goal wins", NamedTextColor.GOLD);
         };
         Title title = Title.title(
                 Component.text("Kick off!", NamedTextColor.GREEN, TextDecoration.BOLD), subtitle);
@@ -1948,10 +1994,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private void updateTimerBar(Match match) {
         int seconds = Math.max(match.secondsLeft, 0);
         String time = String.format("%d:%02d", seconds / 60, seconds % 60);
-        String half = match.duel ? "Duel" : match.roulette ? "Roulette" : match.quick ? "Quickmatch"
+        String half = match.goldenGoal ? "Golden Goal"
+                : match.duel ? "Duel" : match.roulette ? "Roulette" : match.quick ? "Quickmatch"
                 : match.phase == Match.Phase.FIRST_HALF ? "First Half" : "Second Half";
 
-        match.timerBar.progress(Math.min(1.0f, seconds / (float) match.playSeconds));
+        match.timerBar.progress(Math.min(1.0f, seconds / (float) (match.goldenGoal ? GOLDEN_GOAL_SECONDS : match.playSeconds)));
         if (match.paused) {
             match.timerBar.color(BossBar.Color.RED);
             match.timerBar.name(Component.text("Paused - " + time, NamedTextColor.RED, TextDecoration.BOLD));
@@ -1967,6 +2014,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case START -> "Match starts in " + n;
             case HALF_TIME -> "Half Time - second half starts in " + String.format("%d:%02d", n / 60, n % 60);
             case GOAL -> "Goal! Play resumes in " + n;
+            case GOLDEN_GOAL -> "Golden goal starts in " + n;
         };
         match.timerBar.color(BossBar.Color.GREEN);
         match.timerBar.progress(match.countdownType == Match.CountdownType.HALF_TIME
@@ -2005,7 +2053,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         Component subtitle = Component.text(
-                match.countdownType == Match.CountdownType.START ? "Match starts in..." : "Second half starts in...",
+                match.countdownType == Match.CountdownType.START ? "Match starts in..."
+                        : match.countdownType == Match.CountdownType.GOLDEN_GOAL ? "Golden goal starts in..."
+                        : "Second half starts in...",
                 NamedTextColor.GRAY);
         Title title = Title.title(
                 Component.text(String.valueOf(n), NamedTextColor.GOLD, TextDecoration.BOLD),

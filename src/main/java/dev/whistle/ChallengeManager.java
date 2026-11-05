@@ -89,12 +89,12 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
     // Same layout as the match menus.
     private static final int SLOT_SELECT = 11;
     private static final int SLOT_INVITE = 15;
-    private static final int SLOT_DUELS = 11;      // six challenges in two rows of three
-    private static final int SLOT_ONEBOUNCE = 13;
-    private static final int SLOT_SMASH = 15;
-    private static final int SLOT_COLORCOVER = 20;
-    private static final int SLOT_HOTPOTATO = 22;
-    private static final int SLOT_ROULETTE = 24;
+    private static final int SLOT_DUELS = 1;       // top row: the four games that need a stadium...
+    private static final int SLOT_ONEBOUNCE = 3;
+    private static final int SLOT_SMASH = 5;
+    private static final int SLOT_COLORCOVER = 7;
+    private static final int SLOT_HOTPOTATO = 21;  // ...bottom row: the two newer ones, with Back in the corner
+    private static final int SLOT_ROULETTE = 23;
     private static final int SLOT_PREVIOUS = 21;
     private static final int SLOT_PAGE = 22;
     private static final int SLOT_NEXT = 23;

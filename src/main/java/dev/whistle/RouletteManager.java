@@ -76,6 +76,7 @@ final class RouletteManager implements Listener {
     private final Map<UUID, Long> lastStick = new HashMap<>();
     /** Every running Roulette match, and the match-clock second (seconds played) at which the next power is given. */
     private final Map<Match, Integer> nextRoll = new HashMap<>();
+    private final java.util.Set<Match> inOvertime = new java.util.HashSet<>(); // golden goal: its clock starts again from 0
 
     RouletteManager(JavaPlugin plugin, MatchManager matches) {
         this.plugin = plugin;
@@ -108,13 +109,16 @@ final class RouletteManager implements Listener {
             Map.Entry<Match, Integer> entry = it.next();
             Match match = entry.getKey();
             if (!matches.isLive(match)) {
+                inOvertime.remove(match);
                 it.remove(); // the match is over (everyone's powers were already taken off as they left it)
                 continue;
             }
             if (!match.started || match.paused) continue;
 
+            if (match.goldenGoal && inOvertime.add(match)) entry.setValue(ROLL_SECONDS); // powers carry on every 30s
             // Match-clock seconds, so a goal freeze or a pause doesn't use up a power's time.
-            int played = match.playSeconds - Math.max(0, match.secondsLeft);
+            int played = match.goldenGoal ? 300 - Math.max(0, match.secondsLeft)
+                    : match.playSeconds - Math.max(0, match.secondsLeft);
             if (played >= entry.getValue() && match.secondsLeft > 0) {
                 roll(match);
                 entry.setValue(entry.getValue() + ROLL_SECONDS);
@@ -200,6 +204,7 @@ final class RouletteManager implements Listener {
         }
         active.clear();
         nextRoll.clear();
+        inOvertime.clear();
     }
 
     private void resetJump(Player player) {
