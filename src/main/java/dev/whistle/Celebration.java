@@ -28,6 +28,7 @@ final class Celebration implements Listener {
 
     private static final int FIREWORKS = 5;
     private static final long FIREWORK_GAP_TICKS = 6L;
+    private static final double VIEW_RANGE_SQUARED = 96.0 * 96.0;
 
     /** A few colourful, differently shaped bursts. */
     private static final List<FireworkEffect> EFFECTS = List.of(
@@ -95,7 +96,21 @@ final class Celebration implements Listener {
             fw.setFireworkMeta(meta);
             fw.getPersistentDataContainer().set(fireworkKey, PersistentDataType.BYTE, (byte) 1);
         });
-        firework.detonate();
+        // Detonating the moment it spawns works for Java clients, but Geyser can't show it to Bedrock players (the
+        // explosion arrives before their client has the rocket). So when a Bedrock player is nearby, let it fly up and
+        // burst on its own like a normal firework.
+        if (!bedrockNearby(winner)) firework.detonate();
+    }
+
+    /** True when any Bedrock (Geyser) player is close enough to see the winner's fireworks. */
+    private boolean bedrockNearby(Player winner) {
+        Location centre = winner.getLocation();
+        for (Player other : winner.getWorld().getPlayers()) {
+            if (BedrockSupport.isBedrock(other) && other.getLocation().distanceSquared(centre) <= VIEW_RANGE_SQUARED) {
+                return true;
+            }
+        }
+        return false;
     }
 
     /** These fireworks are only for show: they never hurt anyone. */
