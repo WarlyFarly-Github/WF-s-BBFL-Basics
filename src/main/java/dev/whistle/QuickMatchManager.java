@@ -64,6 +64,7 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
     private final MatchManager matches;
     private final LobbyManager lobbyLocations;
     private final BukkitTask expiryTask;
+    private final LobbyBall lobbyBall; // a football to kick around while waiting in the lobby
 
     /** Where each player was before being sent to the quickmatch lobby, so they can be sent back. */
     private final Map<UUID, Location> origins = new HashMap<>();
@@ -77,6 +78,8 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
         this.stadiums = stadiums;
         this.matches = matches;
         this.lobbyLocations = lobbyLocations;
+        this.lobbyBall = new LobbyBall(plugin, matches, () -> lobbyLocations.get(LobbyManager.QUICKMATCH), origins::size);
+        matches.addLobbyBall(lobbyBall);
         // Votes expire on their own, so check regularly (every 10 seconds) rather than only when someone votes.
         this.expiryTask = Bukkit.getScheduler().runTaskTimer(plugin, this::purgeExpiredVotes, 200L, 200L);
     }
@@ -89,6 +92,7 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
         if (lobby == null) return;
         origins.putIfAbsent(player.getUniqueId(), player.getLocation().clone());
         player.teleport(lobby);
+        lobbyBall.refresh(); // a football as soon as someone is in the lobby
         player.sendMessage(Component.text("You were teleported to the quickmatch lobby. Use /match leave to go back.",
                 NamedTextColor.GRAY));
     }
@@ -98,6 +102,7 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
         Location origin = origins.remove(id);
         Player player = Bukkit.getPlayer(id);
         if (origin != null && player != null && player.isOnline()) player.teleport(origin);
+        lobbyBall.refresh(); // and no football once the lobby is empty
     }
 
     private boolean hasVote(UUID id) {

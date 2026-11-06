@@ -45,9 +45,12 @@ commands:
     description: Create and edit Hot Potato arenas (operators only).
     usage: /hpstadium <create|delete|list|info|setpos|clearpos|bounds|edit|confirm>
     permission: wfsbbfl.hpstadium
+  lobby:
+    description: Go to the minigames lobby, where a vote picks the next minigame.
+    usage: /lobby <minigames|leave>
   setlobby:
     description: Set a lobby location (operators only).
-    usage: /setlobby quickmatch
+    usage: /setlobby <quickmatch|minigames>
     permission: wfsbbfl.setlobby
   setprefix:
     description: Set the red or blue team name tag prefix (operators only).

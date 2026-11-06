@@ -202,6 +202,24 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.colorCover = colorCover;
     }
 
+    private final List<LobbyBall> lobbyBalls = new ArrayList<>();
+
+    /** A lobby's football (the minigames lobby and the quickmatch lobby each have one). */
+    void addLobbyBall(LobbyBall ball) {
+        lobbyBalls.add(ball);
+    }
+
+    private MinigamesLobbyManager minigamesLobby;
+
+    void setMinigamesLobby(MinigamesLobbyManager minigamesLobby) {
+        this.minigamesLobby = minigamesLobby;
+    }
+
+    /** True if the player is in the minigames lobby. */
+    boolean inLobby(UUID id) {
+        return minigamesLobby != null && minigamesLobby.isInLobby(id);
+    }
+
     private TrainingManager training;
 
     void setTraining(TrainingManager training) {
@@ -301,7 +319,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 || (oneBounce != null && oneBounce.ownsBall(ball))
                 || (colorCover != null && colorCover.ownsBall(ball))
                 || (hotPotato != null && hotPotato.ownsBall(ball))
-                || (training != null && training.ownsBall(ball));
+                || (training != null && training.ownsBall(ball))
+                || lobbyBalls.stream().anyMatch(b -> b.owns(ball));
     }
 
     /** Removes any of our balls near this spot that no game is using, before a fresh one is spawned there. */
@@ -328,6 +347,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (hotPotato != null) hotPotato.shutdown();
         if (roulette != null) roulette.shutdown();
         if (training != null) training.shutdown();
+        lobbyBalls.forEach(LobbyBall::shutdown);
         new ArrayList<>(matchByPlayer.values()).forEach(m -> {
             cancelTasks(m);
             m.onlineAudience().forEach(p -> restoreChestplate(m, p));
@@ -1749,6 +1769,17 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     && byEntity.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK
                     && !isWatching(kicker.getUniqueId())) {
                 oneBounce.onHit(kicker, kickVelocity(kicker));
+            }
+            return;
+        }
+
+        for (LobbyBall lobbyBall : lobbyBalls) {
+            if (!lobbyBall.owns(event.getEntity())) continue;
+            // A lobby football: an ordinary kick, for anyone waiting in the lobby.
+            if (event instanceof EntityDamageByEntityEvent byEntity && byEntity.getDamager() instanceof Player kicker
+                    && byEntity.getCause() == EntityDamageEvent.DamageCause.ENTITY_ATTACK
+                    && !isWatching(kicker.getUniqueId())) {
+                lobbyBall.onHit(kicker, event.getEntity(), kickVelocity(kicker));
             }
             return;
         }

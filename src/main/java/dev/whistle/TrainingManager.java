@@ -293,6 +293,10 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
             error(player, "Leave your match (or stop watching) before you start training.");
             return true;
         }
+        if (matches.inLobby(id)) {
+            error(player, "Leave the minigames lobby first (/lobby leave).");
+            return true;
+        }
         openModeMenu(player);
         return true;
     }
@@ -454,7 +458,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
 
     private void begin(Player player, Mode mode, Stadium stadium) {
         UUID id = player.getUniqueId();
-        if (byPlayer.containsKey(id) || matches.isInMatch(id) || matches.isWatching(id)) {
+        if (byPlayer.containsKey(id) || matches.isInMatch(id) || matches.isWatching(id) || matches.inLobby(id)) {
             error(player, "You can't start training right now.");
             return;
         }

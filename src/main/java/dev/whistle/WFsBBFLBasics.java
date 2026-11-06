@@ -30,6 +30,7 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
 
     private NamespacedKey whistleKey;
     private MatchManager matches;
+    private MinigamesLobbyManager minigamesLobby;
     private QuickMatchManager quickMatches;
     private final Map<UUID, Long> lastBlown = new HashMap<>();
 
@@ -155,6 +156,15 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
             lobbyCommand.setTabCompleter(lobbies);
         }
 
+        minigamesLobby = new MinigamesLobbyManager(this, matches, challenges, lobbies);
+        matches.setMinigamesLobby(minigamesLobby);
+        getServer().getPluginManager().registerEvents(minigamesLobby, this);
+        PluginCommand minigamesLobbyCommand = getCommand("lobby");
+        if (minigamesLobbyCommand != null) {
+            minigamesLobbyCommand.setExecutor(minigamesLobby);
+            minigamesLobbyCommand.setTabCompleter(minigamesLobby);
+        }
+
         quickMatches = new QuickMatchManager(this, stadiums, matches, lobbies);
         matches.setQuickMatches(quickMatches);
         getServer().getPluginManager().registerEvents(quickMatches, this);
@@ -167,6 +177,7 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        if (minigamesLobby != null) minigamesLobby.shutdown();
         if (quickMatches != null) quickMatches.shutdown();
         if (matches != null) matches.shutdown();
     }

@@ -16,7 +16,8 @@ import java.util.List;
 final class LobbyManager implements CommandExecutor, TabCompleter {
 
     static final String QUICKMATCH = "quickmatch";
-    private static final List<String> NAMES = List.of(QUICKMATCH);
+    static final String MINIGAMES = "minigames";
+    private static final List<String> NAMES = List.of(QUICKMATCH, MINIGAMES);
 
     private final JavaPlugin plugin;
 
@@ -41,7 +42,7 @@ final class LobbyManager implements CommandExecutor, TabCompleter {
             return true;
         }
         if (args.length != 1 || !NAMES.contains(args[0].toLowerCase())) {
-            player.sendMessage(Component.text("Usage: /setlobby quickmatch", NamedTextColor.RED));
+            player.sendMessage(Component.text("Usage: /setlobby <quickmatch|minigames>", NamedTextColor.RED));
             return true;
         }
         String name = args[0].toLowerCase();

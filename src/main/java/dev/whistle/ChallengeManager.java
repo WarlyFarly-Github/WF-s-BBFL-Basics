@@ -526,7 +526,7 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
     }
 
     /** The most players a game can have, counting the host. */
-    private static int maxPlayers(Challenge game) {
+    static int maxPlayers(Challenge game) {
         return switch (game) {
             case DUELS -> 2;
             case SMASH -> SmashManager.MAX_PLAYERS;
@@ -534,6 +534,24 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
             case COLORCOVER -> ColorCoverManager.MAX_PLAYERS;
             case HOTPOTATO -> HotPotatoManager.MAX_PLAYERS;
             case ROULETTE -> RouletteManager.MAX_PLAYERS;
+        };
+    }
+
+    /**
+     * Starts a game for this group of players (the minigames lobby uses this when a vote is won). Returns null when it
+     * started, or a message saying why it couldn't.
+     */
+    String launch(Challenge game, List<Player> players) {
+        if (players.size() < 2) return game.label + " needs at least 2 players.";
+        if (game == Challenge.DUELS) {
+            return players.size() == 2 ? matches.startDuel(players.get(0), players.get(1)) : "Duels needs exactly 2 players.";
+        }
+        return switch (game) {
+            case ONEBOUNCE -> oneBounce.start(players, false);
+            case COLORCOVER -> colorCover.start(players, false);
+            case HOTPOTATO -> hotPotato.start(players, false);
+            case ROULETTE -> matches.startRoulette(players);
+            default -> smash.start(players, false);
         };
     }
 
