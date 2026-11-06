@@ -614,11 +614,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         invites.put(id, new Invite(session, System.currentTimeMillis()));
         target.sendMessage(Component.text(host.getName(), NamedTextColor.YELLOW)
                 .append(Component.text(" invited you to Free Play on " + session.stadium.name + ". ", NamedTextColor.GRAY))
-                .append(Component.text("[Accept]", NamedTextColor.GREEN, TextDecoration.BOLD)
-                        .clickEvent(ClickEvent.runCommand("/training accept")))
-                .append(Component.text(" "))
-                .append(Component.text("[Decline]", NamedTextColor.RED, TextDecoration.BOLD)
-                        .clickEvent(ClickEvent.runCommand("/training decline"))));
+                .append(BedrockSupport.respondButtons(target, "/training")));
         host.sendMessage(Component.text("Invited " + target.getName() + " to your Free Play.", NamedTextColor.GREEN));
     }
 

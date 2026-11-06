@@ -1605,11 +1605,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             invites.put(target.getUniqueId(), new Invite(host.getUniqueId(), null, System.currentTimeMillis(), false));
             target.sendMessage(Component.text(host.getName(), NamedTextColor.YELLOW)
                     .append(Component.text(" invited you to referee a football match. ", NamedTextColor.GRAY))
-                    .append(Component.text("[Accept]", NamedTextColor.GREEN, TextDecoration.BOLD)
-                            .clickEvent(ClickEvent.runCommand("/match accept")))
-                    .append(Component.text(" "))
-                    .append(Component.text("[Decline]", NamedTextColor.RED, TextDecoration.BOLD)
-                            .clickEvent(ClickEvent.runCommand("/match decline"))));
+                    .append(BedrockSupport.respondButtons(target, "/match")));
             host.sendMessage(Component.text("Invited " + target.getName() + " as a referee.", NamedTextColor.GREEN));
             return;
         }
@@ -1623,11 +1619,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     .append(Component.text(" invited you to be a substitute for the ", NamedTextColor.GRAY))
                     .append(Component.text(team.label + " team", team.color))
                     .append(Component.text(". ", NamedTextColor.GRAY))
-                    .append(Component.text("[Accept]", NamedTextColor.GREEN, TextDecoration.BOLD)
-                            .clickEvent(ClickEvent.runCommand("/match accept")))
-                    .append(Component.text(" "))
-                    .append(Component.text("[Decline]", NamedTextColor.RED, TextDecoration.BOLD)
-                            .clickEvent(ClickEvent.runCommand("/match decline"))));
+                    .append(BedrockSupport.respondButtons(target, "/match")));
             host.sendMessage(Component.text("Invited " + target.getName() + " as a ", NamedTextColor.GREEN)
                     .append(Component.text(team.label + " substitute", team.color))
                     .append(Component.text(".", NamedTextColor.GREEN)));
@@ -1644,11 +1636,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 .append(Component.text(" invited you to the ", NamedTextColor.GRAY))
                 .append(Component.text(team.label + " team", team.color))
                 .append(Component.text(" in a football match. ", NamedTextColor.GRAY))
-                .append(Component.text("[Accept]", NamedTextColor.GREEN, TextDecoration.BOLD)
-                        .clickEvent(ClickEvent.runCommand("/match accept")))
-                .append(Component.text(" "))
-                .append(Component.text("[Decline]", NamedTextColor.RED, TextDecoration.BOLD)
-                        .clickEvent(ClickEvent.runCommand("/match decline"))));
+                .append(BedrockSupport.respondButtons(target, "/match")));
 
         host.sendMessage(Component.text("Invited " + target.getName() + " to the ", NamedTextColor.GREEN)
                 .append(Component.text(team.label + " team", team.color))

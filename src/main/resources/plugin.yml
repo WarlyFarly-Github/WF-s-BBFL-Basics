@@ -4,7 +4,7 @@ version: 1.2.0
 author: WarlyFarly
 main: dev.whistle.WFsBBFLBasics
 api-version: '26.3'
-softdepend: [TAB]
+softdepend: [TAB, Geyser-Spigot, floodgate]
 description: Basic utilities for BBFL, including the admin Whistle and football matches.
 commands:
   bbflbasics:

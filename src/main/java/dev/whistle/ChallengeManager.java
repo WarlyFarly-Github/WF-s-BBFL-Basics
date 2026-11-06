@@ -470,11 +470,7 @@ final class ChallengeManager implements CommandExecutor, TabCompleter, Listener 
         target.sendMessage(Component.text(host.getName(), NamedTextColor.YELLOW)
                 .append(Component.text(" challenged you to " + game.label + " (" + game.description + "). ",
                         NamedTextColor.GRAY))
-                .append(Component.text("[Accept]", NamedTextColor.GREEN, TextDecoration.BOLD)
-                        .clickEvent(ClickEvent.runCommand("/challenge accept")))
-                .append(Component.text(" "))
-                .append(Component.text("[Decline]", NamedTextColor.RED, TextDecoration.BOLD)
-                        .clickEvent(ClickEvent.runCommand("/challenge decline"))));
+                .append(BedrockSupport.respondButtons(target, "/challenge")));
         host.sendMessage(Component.text("Invited " + target.getName() + " to " + game.label + ".", NamedTextColor.GREEN));
         if (game != Challenge.DUELS) {
             host.sendMessage(Component.text("Invite more players, or use /challenge start once enough have accepted.",
