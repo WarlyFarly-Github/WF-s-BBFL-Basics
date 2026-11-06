@@ -32,6 +32,7 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
     private MatchManager matches;
     private MinigamesLobbyManager minigamesLobby;
     private QuickMatchManager quickMatches;
+    private LeaderboardManager leaderboard;
     private final Map<UUID, Long> lastBlown = new HashMap<>();
 
     @Override
@@ -68,6 +69,15 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
         if (matchCommand != null) {
             matchCommand.setExecutor(matches);
             matchCommand.setTabCompleter(matches);
+        }
+
+        leaderboard = new LeaderboardManager(this);
+        matches.setLeaderboard(leaderboard);
+        getServer().getPluginManager().registerEvents(leaderboard, this);
+        PluginCommand leaderboardCommand = getCommand("leaderboard");
+        if (leaderboardCommand != null) {
+            leaderboardCommand.setExecutor(leaderboard);
+            leaderboardCommand.setTabCompleter(leaderboard);
         }
 
         SpectatorManager spectators = new SpectatorManager(this, matches);
@@ -182,6 +192,7 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
         if (minigamesLobby != null) minigamesLobby.shutdown();
         if (quickMatches != null) quickMatches.shutdown();
         if (matches != null) matches.shutdown();
+        if (leaderboard != null) leaderboard.shutdown();
     }
 
     @Override

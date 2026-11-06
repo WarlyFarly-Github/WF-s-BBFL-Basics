@@ -32,6 +32,7 @@ A Minecraft plugin by **WarlyFarly** providing basic utilities and a football ma
 | `/stadium list` | List stadiums |
 | `/stadium info <name>` | View stadium information |
 | `/challenge` | Start a challenge |
+| `/leaderboard` | All-time leaderboards: quickest goal, matches won, goals scored, time played |
 
 
 Additional commands support player invitations and stadium goal configuration.

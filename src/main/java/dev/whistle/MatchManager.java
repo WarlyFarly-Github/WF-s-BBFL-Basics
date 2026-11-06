@@ -253,6 +253,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     void setHotPotato(HotPotatoManager hotPotato) {
         this.hotPotato = hotPotato;
     }
+    private LeaderboardManager leaderboard;
+
+    void setLeaderboard(LeaderboardManager leaderboard) {
+        this.leaderboard = leaderboard;
+    }
+
     private Celebration celebration;
 
     void setCelebration(Celebration celebration) {
@@ -789,6 +795,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         if (match.goldenGoal) { // the golden goal wins the match on the spot
+            match.fullTime = true;
             endMatch(match, "Golden goal! " + (match.redScore > match.blueScore ? "Red" : "Blue") + " team wins!");
             return;
         }
@@ -798,7 +805,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     /** Detects the ball entering a goal area of the match's stadium. */
     private void checkGoals() {
         for (Match match : new LinkedHashSet<>(matchByPlayer.values())) {
-            if (!match.started || match.phase == Match.Phase.COUNTDOWN || match.paused || match.stadium == null) continue;
+            if (!match.started || match.phase == Match.Phase.COUNTDOWN || match.paused) continue;
+            match.playTicks++;
+            if (match.stadium == null) continue;
             SulfurCube ball = match.ball;
             if (ball == null || !ball.isValid()) continue;
 
@@ -807,6 +816,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             for (Team defending : Team.values()) {
                 if (match.stadium.goalContains(defending, ballCenter)) {
                     Team scoring = defending == Team.RED ? Team.BLUE : Team.RED;
+                    // Leaderboard: the last player to touch the ball gets the goal, unless it went into their own net.
+                    if (leaderboard != null && match.lastKicker != null && match.contains(match.lastKicker)
+                            && match.teamOf(match.lastKicker) == scoring) {
+                        leaderboard.recordGoal(match.lastKicker, match.playTicks);
+                    }
                     scoreGoal(match, scoring, lastScorerName(match));
                     scored = true;
                     break;
@@ -1843,6 +1857,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private void tickTimer(Match match) {
         if (match.phase == Match.Phase.COUNTDOWN || match.paused) return;
 
+        if (leaderboard != null) {
+            for (Player p : match.onlineMembers()) leaderboard.addPlaySeconds(p.getUniqueId(), 1);
+        }
         match.secondsLeft--;
         if (match.secondsLeft > 0) {
             updateTimerBar(match);
@@ -1856,6 +1873,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         } else if (match.goldenGoal) {
             endMatch(match, "Full time! Nobody scored in the golden goal period.");
         } else {
+            match.fullTime = true;
             endMatch(match, "Full time!");
         }
     }
@@ -2850,6 +2868,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private void endMatch(Match match, String reason) {
         announceToDiscord(match, !match.started); // ended before kick-off counts as cancelled
+        if (leaderboard != null && match.fullTime && match.redScore != match.blueScore) {
+            Team winning = match.redScore > match.blueScore ? Team.RED : Team.BLUE;
+            for (UUID id : match.teamSet(winning)) leaderboard.recordWin(id);
+        }
         cancelTasks(match);
         if (match.ball != null) match.ball.remove();
         Component message = Component.text(reason, NamedTextColor.YELLOW);

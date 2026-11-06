@@ -57,10 +57,18 @@ commands:
     description: Set the red or blue team name tag prefix (operators only).
     usage: /setprefix <red|blue> <prefix|none>
     permission: wfsbbfl.setprefix
+  leaderboard:
+    description: See the all-time leaderboards (quickest goal, matches won, goals, time played).
+    usage: /leaderboard [quickest|wins|goals|playtime]
+    aliases: [lb]
+    permission: wfsbbfl.leaderboard
   stadium:
     description: Create stadiums, set centre points and goal areas.
     usage: /stadium <create|delete|list|info|setcentre|setstands|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|builder|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>
 permissions:
+  wfsbbfl.leaderboard:
+    description: Allows /leaderboard
+    default: true
   whistle.give:
     description: Allows use of /whistle
     default: op

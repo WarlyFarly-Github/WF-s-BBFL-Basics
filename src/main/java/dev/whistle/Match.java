@@ -53,6 +53,8 @@ final class Match {
     int halfTimeSeconds = DEFAULT_HALF_TIME_SECONDS; // length of the half-time break (league matches), set in the timings menu
     int redScore;
     int blueScore;
+    int playTicks;      // ticks of live play so far (not counting freezes or pauses): the match clock, for the leaderboard
+    boolean fullTime;   // the match was played to a result (full time or a golden goal), so its winner gets a win
     boolean started;
     /** Referees: in the match (they see its bars and blow the whistle) but on neither team. */
     final Set<UUID> referees = new LinkedHashSet<>();
