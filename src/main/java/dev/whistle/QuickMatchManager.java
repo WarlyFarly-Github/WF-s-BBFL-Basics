@@ -10,11 +10,20 @@ import org.bukkit.Location;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
+import org.bukkit.Material;
+import org.bukkit.NamespacedKey;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
 import org.bukkit.event.Listener;
+import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
+import org.bukkit.inventory.ItemFlag;
+import org.bukkit.inventory.ItemStack;
+import org.bukkit.inventory.meta.ItemMeta;
+import org.bukkit.persistence.PersistentDataType;
 import org.bukkit.plugin.java.JavaPlugin;
 import org.bukkit.scheduler.BukkitTask;
 
@@ -29,7 +38,8 @@ import java.util.Set;
 import java.util.UUID;
 
 /**
- * Quickmatches: anyone can /votematch a stadium and length. Once enough players have voted for the same match, a
+ * Quickmatches: anyone can /votematch a stadium and length (or use the /quickmatch menu, which needs no typing, for
+ * example on Bedrock). Once enough players have voted for the same match, a
  * 60 second lobby opens (anyone can click to join), and then the match starts like a league match, but with a single
  * period of the voted length and no half time.
  */
@@ -64,6 +74,7 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
     private final MatchManager matches;
     private final LobbyManager lobbyLocations;
     private final BukkitTask expiryTask;
+    private final NamespacedKey menuKey;
     private final LobbyBall lobbyBall; // a football to kick around while waiting in the lobby
 
     /** Where each player was before being sent to the quickmatch lobby, so they can be sent back. */
@@ -78,6 +89,7 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
         this.stadiums = stadiums;
         this.matches = matches;
         this.lobbyLocations = lobbyLocations;
+        this.menuKey = new NamespacedKey(plugin, "quickmatch_menu");
         this.lobbyBall = new LobbyBall(plugin, matches, () -> lobbyLocations.get(LobbyManager.QUICKMATCH), origins::size);
         matches.addLobbyBall(lobbyBall);
         // Votes expire on their own, so check regularly (every 10 seconds) rather than only when someone votes.
@@ -132,8 +144,12 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
             sender.sendMessage(Component.text("Only players can use this command.", NamedTextColor.RED));
             return true;
         }
-        if (args.length == 0 || args.length > 2) {
-            error(player, "Usage: /votematch <stadium> [minutes " + MIN_MINUTES + "-" + MAX_MINUTES + "]");
+        if (args.length == 0) {
+            openMainMenu(player); // no typing needed
+            return true;
+        }
+        if (args.length > 2) {
+            error(player, "Usage: /votematch <stadium> [minutes " + MIN_MINUTES + "-" + MAX_MINUTES + "]   or just /quickmatch");
             return true;
         }
 
@@ -184,6 +200,261 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
         return List.of();
     }
 
+    // ------------------------------------------------------------------ the menu (no typing, for example for Bedrock players)
+
+    private enum MenuType { MAIN, LENGTH, STADIUMS, OPEN }
+
+    private static final int SLOT_VOTE = 11;
+    private static final int SLOT_OPEN = 15;
+    private static final int SLOT_LEAVE = 22;
+    private static final int SLOT_PREVIOUS = 21;
+    private static final int SLOT_NEXT = 23;
+    private static final int SLOT_BACK = 26;
+    private static final int PAGE_SIZE = 18;
+
+    private static final class Gui implements InventoryHolder {
+        private final MenuType type;
+        private final int minutes;
+        private final int page;
+        private final int pages;
+        private Inventory inventory;
+
+        private Gui(MenuType type, int minutes, int page, int pages) {
+            this.type = type;
+            this.minutes = minutes;
+            this.page = page;
+            this.pages = pages;
+        }
+
+        @Override
+        public Inventory getInventory() {
+            return inventory;
+        }
+    }
+
+    /** /quickmatch: vote for a match, join one that is already open, or leave. */
+    private void openMainMenu(Player player) {
+        purgeExpiredVotes();
+        UUID id = player.getUniqueId();
+        Gui holder = new Gui(MenuType.MAIN, 0, 0, 0);
+        Inventory inventory = newMenu(holder, "Quickmatch");
+        inventory.setItem(SLOT_VOTE, button(Material.CLOCK, "Vote for a Quickmatch", NamedTextColor.GOLD,
+                plain("Choose a length, then a stadium.", NamedTextColor.GRAY),
+                plain("When " + MIN_VOTES + " players vote for the same match,", NamedTextColor.GRAY),
+                plain("it opens for everyone to join.", NamedTextColor.GRAY),
+                plain("Click to select", NamedTextColor.YELLOW)));
+        int open = lobbies.size() + (int) votes.keySet().stream().filter(o -> !lobbies.containsKey(o)).count();
+        inventory.setItem(SLOT_OPEN, button(Material.COMPASS, "Open Quickmatches", NamedTextColor.GOLD,
+                plain("Join a match someone has already voted for.", NamedTextColor.GRAY),
+                plain(open == 0 ? "None right now" : open + " available", open == 0 ? NamedTextColor.RED : NamedTextColor.GREEN),
+                plain("Click to select", NamedTextColor.YELLOW)));
+        if (lobbyOf(id) != null || hasVote(id)) {
+            inventory.setItem(SLOT_LEAVE, button(Material.RED_CONCRETE, "Leave Quickmatch", NamedTextColor.RED,
+                    plain(lobbyOf(id) != null ? "You are in a quickmatch lobby." : "You have voted for a quickmatch.",
+                            NamedTextColor.GRAY),
+                    plain("Click to leave and go back", NamedTextColor.YELLOW)));
+        }
+        player.openInventory(inventory);
+    }
+
+    /** Step one of voting: how long the match is. */
+    private void openLengthMenu(Player player) {
+        Gui holder = new Gui(MenuType.LENGTH, 0, 0, 0);
+        Inventory inventory = newMenu(holder, "Quickmatch - Choose Length");
+        for (int minutes = MIN_MINUTES; minutes <= MAX_MINUTES; minutes++) {
+            int slot = minutes <= 5 ? 1 + minutes : 10 + (minutes - 5); // two rows of five
+            ItemStack item = button(Material.CLOCK, minutes + (minutes == 1 ? " minute" : " minutes"), NamedTextColor.GOLD,
+                    plain(minutes == DEFAULT_MINUTES ? "The usual length" : "A " + minutes + " minute match", NamedTextColor.GRAY),
+                    plain("Click to choose", NamedTextColor.YELLOW));
+            item.setAmount(minutes);
+            ItemMeta meta = item.getItemMeta();
+            meta.getPersistentDataContainer().set(menuKey, PersistentDataType.STRING, "minutes:" + minutes);
+            if (minutes == DEFAULT_MINUTES) meta.setEnchantmentGlintOverride(true);
+            item.setItemMeta(meta);
+            inventory.setItem(slot, item);
+        }
+        inventory.setItem(SLOT_BACK, button(Material.OAK_DOOR, "Back", NamedTextColor.DARK_BLUE));
+        player.openInventory(inventory);
+    }
+
+    /** Step two of voting: which stadium (the icon is the stadium's /stadium block). */
+    private void openStadiumMenu(Player player, int minutes, int page) {
+        purgeExpiredVotes();
+        List<Stadium> available = new ArrayList<>();
+        for (String name : stadiums.names()) {
+            Stadium stadium = stadiums.get(name);
+            if (stadium != null && stadium.isComplete()) available.add(stadium);
+        }
+        int pages = Math.max(1, (available.size() + PAGE_SIZE - 1) / PAGE_SIZE);
+        page = Math.max(1, Math.min(page, pages));
+
+        Gui holder = new Gui(MenuType.STADIUMS, minutes, page, pages);
+        Inventory inventory = newMenu(holder, "Quickmatch - " + minutes + (minutes == 1 ? " minute" : " minutes") + " - Stadium");
+        for (int i = 0; i < PAGE_SIZE; i++) {
+            int index = (page - 1) * PAGE_SIZE + i;
+            if (index >= available.size()) break;
+            Stadium stadium = available.get(index);
+            Option option = new Option(stadium.name.toLowerCase(), minutes);
+
+            List<Component> lore = new ArrayList<>();
+            Lobby lobby = lobbies.get(option);
+            if (lobby != null) {
+                lore.add(plain("Open now: " + lobby.players.size() + " joined, starts in " + lobby.secondsLeft + "s", NamedTextColor.GREEN));
+                lore.add(plain("Click to join", NamedTextColor.YELLOW));
+            } else if (matches.stadiumInUse(stadium) || isReserved(stadium)) {
+                lore.add(plain("In use right now", NamedTextColor.RED));
+            } else {
+                int voted = votes.getOrDefault(option, Map.of()).size();
+                lore.add(plain("Votes: " + voted + "/" + MIN_VOTES, NamedTextColor.GRAY));
+                lore.add(plain("Click to vote for a " + minutes + " minute match here", NamedTextColor.YELLOW));
+            }
+            inventory.setItem(i, stadiumItem(stadium, option, lore));
+        }
+        if (available.isEmpty()) {
+            inventory.setItem(13, button(Material.BARRIER, "No stadiums yet", NamedTextColor.RED,
+                    plain("An operator needs to finish a stadium first.", NamedTextColor.GRAY)));
+        }
+        addPaging(inventory, pages);
+        player.openInventory(inventory);
+    }
+
+    /** Matches that are open to join, and matches that already have votes. */
+    private void openOpenMenu(Player player) {
+        purgeExpiredVotes();
+        List<Option> options = new ArrayList<>(lobbies.keySet());
+        for (Option option : votes.keySet()) {
+            if (!lobbies.containsKey(option)) options.add(option);
+        }
+
+        Gui holder = new Gui(MenuType.OPEN, 0, 0, 0);
+        Inventory inventory = newMenu(holder, "Open Quickmatches");
+        int slot = 0;
+        for (Option option : options) {
+            if (slot >= PAGE_SIZE) break;
+            Stadium stadium = stadiums.get(option.stadiumKey());
+            if (stadium == null) continue;
+            List<Component> lore = new ArrayList<>();
+            lore.add(plain(option.minutes() + (option.minutes() == 1 ? " minute" : " minutes"), NamedTextColor.GRAY));
+            Lobby lobby = lobbies.get(option);
+            if (lobby != null) {
+                lore.add(plain("Open now: " + lobby.players.size() + " joined, starts in " + lobby.secondsLeft + "s", NamedTextColor.GREEN));
+                lore.add(plain("Click to join", NamedTextColor.YELLOW));
+            } else {
+                lore.add(plain("Votes: " + votes.get(option).size() + "/" + MIN_VOTES, NamedTextColor.GRAY));
+                lore.add(plain("Click to vote for it", NamedTextColor.YELLOW));
+            }
+            inventory.setItem(slot++, stadiumItem(stadium, option, lore));
+        }
+        if (slot == 0) {
+            inventory.setItem(13, button(Material.BARRIER, "Nothing open right now", NamedTextColor.RED,
+                    plain("Go back and vote for a quickmatch yourself.", NamedTextColor.GRAY)));
+        }
+        inventory.setItem(SLOT_BACK, button(Material.OAK_DOOR, "Back", NamedTextColor.DARK_BLUE));
+        player.openInventory(inventory);
+    }
+
+    private ItemStack stadiumItem(Stadium stadium, Option option, List<Component> lore) {
+        ItemStack item = button(stadium.block != null ? stadium.block : Material.PLAYER_HEAD, stadium.name,
+                NamedTextColor.GOLD, lore.toArray(new Component[0]));
+        ItemMeta meta = item.getItemMeta();
+        meta.getPersistentDataContainer().set(menuKey, PersistentDataType.STRING,
+                "option:" + option.stadiumKey() + ":" + option.minutes());
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private void addPaging(Inventory inventory, int pages) {
+        if (pages > 1) {
+            inventory.setItem(SLOT_PREVIOUS, button(Material.ARROW, "Previous Page", NamedTextColor.WHITE));
+            inventory.setItem(SLOT_NEXT, button(Material.ARROW, "Next Page", NamedTextColor.WHITE));
+        }
+        inventory.setItem(SLOT_BACK, button(Material.OAK_DOOR, "Back", NamedTextColor.DARK_BLUE));
+    }
+
+    @EventHandler
+    public void onMenuClick(InventoryClickEvent event) {
+        if (!(event.getInventory().getHolder() instanceof Gui menu)) return;
+        event.setCancelled(true);
+        if (!(event.getWhoClicked() instanceof Player player)) return;
+        if (event.getClickedInventory() == null || event.getClickedInventory() != event.getInventory()) return;
+        int slot = event.getSlot();
+
+        switch (menu.type) {
+            case MAIN -> {
+                if (slot == SLOT_VOTE) later(() -> openLengthMenu(player));
+                else if (slot == SLOT_OPEN) later(() -> openOpenMenu(player));
+                else if (slot == SLOT_LEAVE) {
+                    later(() -> {
+                        leaveLobby(player);
+                        openMainMenu(player);
+                    });
+                }
+            }
+            case LENGTH -> {
+                if (slot == SLOT_BACK) {
+                    later(() -> openMainMenu(player));
+                    return;
+                }
+                String key = menuValue(event.getCurrentItem());
+                if (key != null && key.startsWith("minutes:")) {
+                    int minutes = Integer.parseInt(key.substring("minutes:".length()));
+                    later(() -> openStadiumMenu(player, minutes, 1));
+                }
+            }
+            case STADIUMS, OPEN -> {
+                if (slot == SLOT_BACK) {
+                    later(() -> {
+                        if (menu.type == MenuType.STADIUMS) openLengthMenu(player);
+                        else openMainMenu(player);
+                    });
+                } else if ((slot == SLOT_PREVIOUS || slot == SLOT_NEXT) && menu.type == MenuType.STADIUMS) {
+                    int target = menu.page + (slot == SLOT_NEXT ? 1 : -1);
+                    if (target >= 1 && target <= menu.pages) later(() -> openStadiumMenu(player, menu.minutes, target));
+                } else if (slot < PAGE_SIZE) {
+                    String key = menuValue(event.getCurrentItem());
+                    if (key == null || !key.startsWith("option:")) return;
+                    String[] parts = key.split(":");
+                    Stadium stadium = stadiums.get(parts[1]);
+                    int minutes = Integer.parseInt(parts[2]);
+                    later(() -> {
+                        player.closeInventory();
+                        if (stadium == null || !stadium.isComplete()) error(player, "That stadium isn't available any more.");
+                        else vote(player, stadium, minutes);
+                    });
+                }
+            }
+        }
+    }
+
+    private String menuValue(ItemStack item) {
+        if (item == null || !item.hasItemMeta()) return null;
+        return item.getItemMeta().getPersistentDataContainer().get(menuKey, PersistentDataType.STRING);
+    }
+
+    private void later(Runnable action) {
+        Bukkit.getScheduler().runTask(plugin, action);
+    }
+
+    private Component plain(String text, NamedTextColor color) {
+        return Component.text(text, color).decoration(TextDecoration.ITALIC, false);
+    }
+
+    private ItemStack button(Material material, String name, NamedTextColor color, Component... lore) {
+        ItemStack item = new ItemStack(material);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(Component.text(name, color, TextDecoration.BOLD).decoration(TextDecoration.ITALIC, false));
+        if (lore.length > 0) meta.lore(List.of(lore));
+        meta.addItemFlags(ItemFlag.HIDE_ATTRIBUTES, ItemFlag.HIDE_ADDITIONAL_TOOLTIP);
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    private Inventory newMenu(Gui holder, String title) {
+        Inventory inventory = Bukkit.createInventory(holder, 27, Component.text(title, NamedTextColor.DARK_GRAY));
+        holder.inventory = inventory;
+        return inventory;
+    }
+
     // ------------------------------------------------------------------ votes
 
     private void vote(Player player, Stadium stadium, int minutes) {
@@ -229,7 +500,7 @@ final class QuickMatchManager implements CommandExecutor, TabCompleter, Listener
 
         // Clicking this message votes for the same match, which sends it again.
         Component message = Component.text(player.getName() + " has voted for a " + minutes + " minute quickmatch on "
-                        + stadium.name + "! Click to vote for this match.", NamedTextColor.GOLD)
+                        + stadium.name + "! Click to vote for this match, or use /quickmatch.", NamedTextColor.GOLD)
                 .clickEvent(ClickEvent.runCommand("/votematch " + stadium.name + " " + minutes))
                 .hoverEvent(HoverEvent.showText(Component.text("Click to vote for this match", NamedTextColor.YELLOW)));
         Bukkit.getServer().sendMessage(message);

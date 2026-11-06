@@ -52,7 +52,7 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
     private static final int VOTE_SECONDS = 30;
     private static final int RETRY_SECONDS = 10;         // wait this long before voting again after a failed start
     private static final int[] VOTE_SLOTS = {3, 4, 5};   // the items 1, 2 and 3
-    private static final int LEAVE_SLOT = 8;
+    private static final int LEAVE_SLOT = 7;            // the 9th slot belongs to the navigator
 
     /** One player in the lobby and what to give back to them when they leave it. */
     private static final class Member {

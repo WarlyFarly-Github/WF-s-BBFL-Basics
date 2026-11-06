@@ -156,6 +156,8 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
             lobbyCommand.setTabCompleter(lobbies);
         }
 
+        getServer().getPluginManager().registerEvents(new NavigatorManager(this), this);
+
         minigamesLobby = new MinigamesLobbyManager(this, matches, challenges, lobbies);
         matches.setMinigamesLobby(minigamesLobby);
         getServer().getPluginManager().registerEvents(minigamesLobby, this);

@@ -20,8 +20,9 @@ commands:
     usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline|watch>
     permission: wfsbbfl.match
   votematch:
-    description: Vote for a quickmatch on a stadium.
-    usage: /votematch <stadium> [minutes]
+    description: Open the quickmatch menu, or vote for a quickmatch on a stadium.
+    usage: /quickmatch   or   /votematch <stadium> [minutes]
+    aliases: [quickmatch]
     permission: wfsbbfl.votematch
   smashstadium:
     description: Create and edit Smash stadiums (operators only).
