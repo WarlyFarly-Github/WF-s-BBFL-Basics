@@ -1,6 +1,6 @@
 name: WFs_BBFL_Basics
 prefix: "WF's BBFL Basics"
-version: 1.2.0
+version: 1.3.0
 author: WarlyFarly
 main: dev.whistle.WFsBBFLBasics
 api-version: '26.3'

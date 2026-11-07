@@ -7,10 +7,12 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
+import org.bukkit.Color;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
+import org.bukkit.Particle;
 import org.bukkit.World;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
@@ -85,6 +87,9 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
     private static final int HIT_COOLDOWN_TICKS = 4;
     private static final int OUT_RESET_COOLDOWN_TICKS = 40;
     private static final double BOUNCE_MAX_DISTANCE = 4.0;
+
+    private static final int HITBOX_PARTICLE_TICKS = 3;      // how often the outlines are drawn for Bedrock players
+    private static final double HITBOX_PARTICLE_STEP = 0.5;  // blocks between particles along an edge
 
     private static final double OBSTACLE_WIDTH = 1.4;
     private static final double OBSTACLE_HEIGHT = 2.6;
@@ -774,6 +779,10 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
         session.tick++;
+        // Bedrock players can't see block displays, so the obstacles are drawn for them as particle outlines instead.
+        if (session.mode == Mode.DODGE && session.tick % HITBOX_PARTICLE_TICKS == 0 && BedrockSupport.isBedrock(owner)) {
+            showHitboxes(session, owner);
+        }
         if (!session.running) return;
 
         if (session.mode == Mode.FREE_PLAY) {
@@ -1008,6 +1017,40 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
                 d.setPersistent(false);     // never saved, so a crash can't leave one behind
             });
             session.obstacles.add(new Obstacle(display, anchor, side.clone(), amplitude, omega, phase));
+        }
+    }
+
+    /**
+     * The outline of every obstacle, drawn with red dust only the given (Bedrock) player can see: the exact footprint that
+     * counts as a hit, up to the height of the block. (Touching also counts a little above and below it, and for a tick
+     * or two after it moves away, so a slope or a jump can't slip past; the outline is what you aim to avoid.)
+     */
+    private void showHitboxes(Session session, Player player) {
+        Particle.DustOptions dust = new Particle.DustOptions(Color.RED, 1.3f);
+        double half = OBSTACLE_WIDTH / 2;
+        for (Obstacle obstacle : session.obstacles) {
+            // Before the run starts the blocks sit at the middle of their path; afterwards they slide.
+            double x = session.running ? obstacle.centreX(session.tick) : obstacle.anchor.getX();
+            double z = session.running ? obstacle.centreZ(session.tick) : obstacle.anchor.getZ();
+            double y0 = obstacle.anchor.getY();
+            double y1 = y0 + OBSTACLE_HEIGHT;
+            double[][] corners = {{x - half, z - half}, {x + half, z - half}, {x + half, z + half}, {x - half, z + half}};
+            for (int i = 0; i < 4; i++) {
+                double[] a = corners[i];
+                double[] b = corners[(i + 1) % 4];
+                dustLine(player, dust, a[0], y0, a[1], b[0], y0, b[1]); // the bottom
+                dustLine(player, dust, a[0], y1, a[1], b[0], y1, b[1]); // the top
+                dustLine(player, dust, a[0], y0, a[1], a[0], y1, a[1]); // the corner post
+            }
+        }
+    }
+
+    private void dustLine(Player player, Particle.DustOptions dust, double x1, double y1, double z1, double x2, double y2, double z2) {
+        double length = Math.sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1) + (z2 - z1) * (z2 - z1));
+        int points = Math.max(1, (int) Math.ceil(length / HITBOX_PARTICLE_STEP));
+        for (int i = 0; i <= points; i++) {
+            double t = i / (double) points;
+            player.spawnParticle(Particle.DUST, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, z1 + (z2 - z1) * t, 1, 0, 0, 0, 0, dust);
         }
     }
 
