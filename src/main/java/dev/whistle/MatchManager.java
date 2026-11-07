@@ -779,11 +779,18 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     /** As scoreGoal, but with the exact text for the goal title's subtitle (referees' goals say who added them). */
     private void scoreGoalWithSubtitle(Match match, Team team, String subtitleText) {
+        scoreGoalWithSubtitle(match, team, subtitleText, false);
+    }
+
+    /** As above; an own goal shows "Own Goal!" as the headline instead of "Goal!". */
+    private void scoreGoalWithSubtitle(Match match, Team team, String subtitleText, boolean ownGoal) {
         if (match.phase == Match.Phase.COUNTDOWN) return;
         match.addGoal(team);
 
         // The title stays up for the whole freeze; the countdown itself runs on the action bar.
-        Component headline = match.duel
+        Component headline = ownGoal
+                ? Component.text("Own Goal!", match.duel ? NamedTextColor.GOLD : team.color, TextDecoration.BOLD)
+                : match.duel
                 ? Component.text("Goal!", NamedTextColor.GOLD, TextDecoration.BOLD)
                 : Component.text(team.label + " Goal!", team.color, TextDecoration.BOLD);
         Title title = Title.title(
@@ -821,7 +828,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                             && match.teamOf(match.lastKicker) == scoring) {
                         leaderboard.recordGoal(match.lastKicker, match.playTicks);
                     }
-                    scoreGoal(match, scoring, lastScorerName(match));
+                    // An own goal: the last player to touch the ball is on the team whose net it went into.
+                    boolean ownGoal = match.lastKicker != null && match.contains(match.lastKicker)
+                            && match.teamOf(match.lastKicker) == defending;
+                    if (ownGoal) {
+                        scoreGoalWithSubtitle(match, scoring, "Own goal by " + lastScorerName(match), true);
+                    } else {
+                        scoreGoal(match, scoring, lastScorerName(match));
+                    }
                     scored = true;
                     break;
                 }

@@ -7,13 +7,12 @@ import net.kyori.adventure.text.format.NamedTextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
-import org.bukkit.Color;
 import org.bukkit.GameMode;
 import org.bukkit.Location;
 import org.bukkit.Material;
 import org.bukkit.NamespacedKey;
-import org.bukkit.Particle;
 import org.bukkit.World;
+import org.bukkit.block.data.BlockData;
 import org.bukkit.command.Command;
 import org.bukkit.command.CommandExecutor;
 import org.bukkit.command.CommandSender;
@@ -50,10 +49,12 @@ import org.joml.Vector3f;
 import java.time.Duration;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -88,9 +89,6 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
     private static final int OUT_RESET_COOLDOWN_TICKS = 40;
     private static final double BOUNCE_MAX_DISTANCE = 4.0;
 
-    private static final int HITBOX_PARTICLE_TICKS = 3;      // how often the outlines are drawn for Bedrock players
-    private static final double HITBOX_PARTICLE_STEP = 0.5;  // blocks between particles along an edge
-
     private static final double OBSTACLE_WIDTH = 1.4;
     private static final double OBSTACLE_HEIGHT = 2.6;
     private static final double[] OBSTACLE_POSITIONS = {0.40, 0.60, 0.78}; // along the way from the start to the goal
@@ -123,6 +121,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         private final double amplitude;
         private double omega;
         private double phase;
+        private final Set<Cell> shown = new HashSet<>(); // the blocks currently shown to a Bedrock player for it
 
         private Obstacle(BlockDisplay display, Location anchor, Vector side, double amplitude, double omega, double phase) {
             this.display = display;
@@ -147,6 +146,13 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
             double z = centreZ(tick);
             return new BoundingBox(x - OBSTACLE_WIDTH / 2, anchor.getY() - 1.5, z - OBSTACLE_WIDTH / 2,
                     x + OBSTACLE_WIDTH / 2, anchor.getY() + OBSTACLE_HEIGHT + 1.0, z + OBSTACLE_WIDTH / 2);
+        }
+    }
+
+    /** One block position. */
+    private record Cell(int x, int y, int z) {
+        private Location at(World world) {
+            return new Location(world, x, y, z);
         }
     }
 
@@ -198,6 +204,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         private final List<Obstacle> obstacles = new ArrayList<>();
         private int points;
         private int hits;
+        private boolean bedrock; // the Dodge player is on Bedrock: the obstacles are shown as blocks sent only to them
 
         private Session(UUID owner, Mode mode, Stadium stadium) {
             this.owner = owner;
@@ -217,6 +224,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
     private final List<Session> all = new ArrayList<>();
     private final Map<UUID, Session> byPlayer = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
+    private final BlockData obstacleBlock = Material.RED_CONCRETE.createBlockData(); // what Bedrock players see
 
     TrainingManager(JavaPlugin plugin, MatchManager matches, StadiumManager stadiums) {
         this.plugin = plugin;
@@ -477,6 +485,7 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
         }
 
         Session session = new Session(id, mode, stadium);
+        session.bedrock = mode == Mode.DODGE && BedrockSupport.isBedrock(player);
         all.add(session);
         Location spot = stadium.center.clone();
         if (mode == Mode.DODGE) {
@@ -779,10 +788,8 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
         session.tick++;
-        // Bedrock players can't see block displays, so the obstacles are drawn for them as particle outlines instead.
-        if (session.mode == Mode.DODGE && session.tick % HITBOX_PARTICLE_TICKS == 0 && BedrockSupport.isBedrock(owner)) {
-            showHitboxes(session, owner);
-        }
+        // Bedrock players can't see block displays, so the obstacles are shown to them as blocks instead.
+        if (session.bedrock) updateBedrockBlocks(session, owner);
         if (!session.running) return;
 
         if (session.mode == Mode.FREE_PLAY) {
@@ -1021,41 +1028,52 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     /**
-     * The outline of every obstacle, drawn with red dust only the given (Bedrock) player can see: the exact footprint that
-     * counts as a hit, up to the height of the block. (Touching also counts a little above and below it, and for a tick
-     * or two after it moves away, so a slope or a jump can't slip past; the outline is what you aim to avoid.)
+     * Bedrock players can't see block displays, and particles linger on their screen too long to follow a moving
+     * obstacle. So for them the obstacles are drawn with real blocks that only they are told about (block changes sent
+     * to that one player): the blocks the obstacle's box covers, moved a cell at a time as it slides, and put back to
+     * what is really there when they are no longer covered. Nothing changes in the world.
      */
-    private void showHitboxes(Session session, Player player) {
-        Particle.DustOptions dust = new Particle.DustOptions(Color.RED, 1.3f);
+    private void updateBedrockBlocks(Session session, Player player) {
         double half = OBSTACLE_WIDTH / 2;
         for (Obstacle obstacle : session.obstacles) {
             // Before the run starts the blocks sit at the middle of their path; afterwards they slide.
             double x = session.running ? obstacle.centreX(session.tick) : obstacle.anchor.getX();
             double z = session.running ? obstacle.centreZ(session.tick) : obstacle.anchor.getZ();
-            double y0 = obstacle.anchor.getY();
-            double y1 = y0 + OBSTACLE_HEIGHT;
-            double[][] corners = {{x - half, z - half}, {x + half, z - half}, {x + half, z + half}, {x - half, z + half}};
-            for (int i = 0; i < 4; i++) {
-                double[] a = corners[i];
-                double[] b = corners[(i + 1) % 4];
-                dustLine(player, dust, a[0], y0, a[1], b[0], y0, b[1]); // the bottom
-                dustLine(player, dust, a[0], y1, a[1], b[0], y1, b[1]); // the top
-                dustLine(player, dust, a[0], y0, a[1], a[0], y1, a[1]); // the corner post
+            int y0 = (int) Math.floor(obstacle.anchor.getY() + 1.0E-6);
+            int y1 = (int) Math.floor(obstacle.anchor.getY() + OBSTACLE_HEIGHT - 1.0E-6);
+
+            Set<Cell> target = new HashSet<>();
+            for (int cx = (int) Math.floor(x - half); cx <= (int) Math.floor(x + half - 1.0E-6); cx++) {
+                for (int cz = (int) Math.floor(z - half); cz <= (int) Math.floor(z + half - 1.0E-6); cz++) {
+                    for (int cy = y0; cy <= y1; cy++) target.add(new Cell(cx, cy, cz));
+                }
             }
+            for (Cell cell : target) {
+                if (!obstacle.shown.contains(cell)) player.sendBlockChange(cell.at(session.world), obstacleBlock);
+            }
+            for (Cell cell : obstacle.shown) {
+                if (!target.contains(cell)) restoreCell(session, player, cell);
+            }
+            obstacle.shown.clear();
+            obstacle.shown.addAll(target);
         }
     }
 
-    private void dustLine(Player player, Particle.DustOptions dust, double x1, double y1, double z1, double x2, double y2, double z2) {
-        double length = Math.sqrt((x2 - x1) * (x2 - x1) + (y2 - y1) * (y2 - y1) + (z2 - z1) * (z2 - z1));
-        int points = Math.max(1, (int) Math.ceil(length / HITBOX_PARTICLE_STEP));
-        for (int i = 0; i <= points; i++) {
-            double t = i / (double) points;
-            player.spawnParticle(Particle.DUST, x1 + (x2 - x1) * t, y1 + (y2 - y1) * t, z1 + (z2 - z1) * t, 1, 0, 0, 0, 0, dust);
-        }
+    /** Tells the player what is really in that spot again. */
+    private void restoreCell(Session session, Player player, Cell cell) {
+        Location at = cell.at(session.world);
+        player.sendBlockChange(at, at.getBlock().getBlockData());
     }
 
     private void removeObstacles(Session session) {
-        for (Obstacle obstacle : session.obstacles) obstacle.display.remove();
+        Player owner = session.bedrock ? Bukkit.getPlayer(session.owner) : null;
+        for (Obstacle obstacle : session.obstacles) {
+            if (owner != null) {
+                for (Cell cell : obstacle.shown) restoreCell(session, owner, cell);
+            }
+            obstacle.shown.clear();
+            obstacle.display.remove();
+        }
         session.obstacles.clear();
     }
 
@@ -1094,6 +1112,17 @@ final class TrainingManager implements CommandExecutor, TabCompleter, Listener {
     private String obstacleHit(Session session, Player player) {
         BoundingBox body = player.getBoundingBox().expand(0.1);
         BoundingBox ball = session.ball == null ? null : session.ball.getBoundingBox().expand(0.05);
+        if (session.bedrock) {
+            // A Bedrock player sees (and is stopped by) whole blocks, so touching one of those is what counts.
+            for (Obstacle obstacle : session.obstacles) {
+                for (Cell cell : obstacle.shown) {
+                    BoundingBox block = new BoundingBox(cell.x(), cell.y(), cell.z(), cell.x() + 1, cell.y() + 1, cell.z() + 1);
+                    if (block.overlaps(body)) return "You touched an obstacle";
+                    if (ball != null && block.overlaps(ball)) return "The ball touched an obstacle";
+                }
+            }
+            return null;
+        }
         for (Obstacle obstacle : session.obstacles) {
             for (int back = 0; back <= 2; back++) {
                 BoundingBox hitBox = obstacle.hitBox(session.tick - back);
