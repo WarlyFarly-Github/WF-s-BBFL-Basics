@@ -94,6 +94,12 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
         getServer().getPluginManager().registerEvents(celebration, this);
         matches.setCelebration(celebration);
 
+        GoalAchievements achievements = new GoalAchievements(this, leaderboard, celebration);
+        leaderboard.setAchievements(achievements);
+        getServer().getPluginManager().registerEvents(achievements, this);
+        PluginCommand achievementsCommand = getCommand("achievements");
+        if (achievementsCommand != null) achievementsCommand.setExecutor(achievements);
+
         SmashManager smash = new SmashManager(this, matches, smashStadiums, celebration);
         matches.setSmash(smash);
         getServer().getPluginManager().registerEvents(smash, this);

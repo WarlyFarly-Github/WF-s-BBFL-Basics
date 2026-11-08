@@ -28,6 +28,7 @@ final class Celebration implements Listener {
 
     private static final int FIREWORKS = 5;
     private static final long FIREWORK_GAP_TICKS = 6L;
+    private static final long ACHIEVEMENT_TITLE_DELAY_TICKS = 90L; // after the goal title (4 seconds) has gone
     private static final double VIEW_RANGE_SQUARED = 96.0 * 96.0;
 
     /** A few colourful, differently shaped bursts. */
@@ -79,6 +80,25 @@ final class Celebration implements Listener {
                 Bukkit.getScheduler().runTaskLater(plugin, () -> launch(winner, effect), i * FIREWORK_GAP_TICKS);
             }
         }
+    }
+
+    /**
+     * A goal achievement: the level up sound and fireworks straight away, then an "Achievement Unlocked!" title once the
+     * goal title has finished so it doesn't replace it.
+     */
+    void achievement(Player player, Component subtitle, int bursts) {
+        if (!player.isOnline()) return;
+        player.playSound(player.getLocation(), "entity.player.levelup", 1.0f, 1.0f);
+        for (int i = 0; i < bursts; i++) {
+            FireworkEffect effect = EFFECTS.get(i % EFFECTS.size());
+            Bukkit.getScheduler().runTaskLater(plugin, () -> launch(player, effect), i * FIREWORK_GAP_TICKS);
+        }
+        Bukkit.getScheduler().runTaskLater(plugin, () -> {
+            if (!player.isOnline()) return;
+            player.showTitle(Title.title(
+                    Component.text("Achievement Unlocked!", NamedTextColor.GOLD, TextDecoration.BOLD), subtitle,
+                    Title.Times.times(Duration.ofMillis(250), Duration.ofSeconds(4), Duration.ofMillis(750))));
+        }, ACHIEVEMENT_TITLE_DELAY_TICKS);
     }
 
     /** One firework bursting a few blocks from the player, at a random spot around them. */

@@ -109,12 +109,23 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
     private final File file;
     private final Map<UUID, Stats> stats = new HashMap<>();
     private boolean dirty;
+    private GoalAchievements achievements;
 
     LeaderboardManager(JavaPlugin plugin) {
         this.plugin = plugin;
         this.file = new File(plugin.getDataFolder(), "stats.yml");
         load();
         Bukkit.getScheduler().runTaskTimer(plugin, this::saveIfDirty, 600L, 600L);
+    }
+
+    void setAchievements(GoalAchievements achievements) {
+        this.achievements = achievements;
+    }
+
+    /** A player's total goals scored (0 if they have none). */
+    int goalsOf(UUID id) {
+        Stats s = stats.get(id);
+        return s == null ? 0 : s.goals;
     }
 
     // ------------------------------------------------------------------ recording
@@ -134,6 +145,7 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
         s.goals++;
         int ticks = Math.max(1, playTicks);
         if (s.quickestTicks == 0 || ticks < s.quickestTicks) s.quickestTicks = ticks;
+        if (achievements != null) achievements.onGoal(id, s.goals); // 100, 250, 500... goals unlock achievements
     }
 
     void recordWin(UUID id) {

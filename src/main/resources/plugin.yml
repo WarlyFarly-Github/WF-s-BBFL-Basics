@@ -62,12 +62,20 @@ commands:
     usage: /leaderboard [quickest|wins|goals|playtime]
     aliases: [lb]
     permission: wfsbbfl.leaderboard
+  achievements:
+    description: See your goal achievements (100, 250, 500, 1000... goals scored).
+    usage: /achievements
+    aliases: [ach]
+    permission: wfsbbfl.achievements
   stadium:
     description: Create stadiums, set centre points and goal areas.
     usage: /stadium <create|delete|list|info|setcentre|setstands|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|builder|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>
 permissions:
   wfsbbfl.leaderboard:
     description: Allows /leaderboard
+    default: true
+  wfsbbfl.achievements:
+    description: Allows /achievements
     default: true
   whistle.give:
     description: Allows use of /whistle
