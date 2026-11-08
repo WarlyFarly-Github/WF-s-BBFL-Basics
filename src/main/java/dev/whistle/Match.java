@@ -3,6 +3,7 @@ package dev.whistle;
 import net.kyori.adventure.bossbar.BossBar;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.GameMode;
@@ -146,6 +147,50 @@ final class Match {
     /** The player's name on this side of a duel. */
     String duelName(Team team) {
         return team == Team.RED ? redName : blueName;
+    }
+
+    // A side can be set to a team from the league script (/match team): its name and hex colour then replace
+    // "Red"/"Blue" and the team colour everywhere in this match.
+    private String redLeagueKey, blueLeagueKey;
+    private String redLeagueName, blueLeagueName;
+    private int redLeagueRgb = -1, blueLeagueRgb = -1; // -1 = the default team
+
+    void setLeagueTeam(Team team, String key, String name, int rgb) {
+        if (team == Team.RED) {
+            redLeagueKey = key;
+            redLeagueName = name;
+            redLeagueRgb = rgb;
+        } else {
+            blueLeagueKey = key;
+            blueLeagueName = name;
+            blueLeagueRgb = rgb;
+        }
+    }
+
+    void clearLeagueTeam(Team team) {
+        setLeagueTeam(team, null, null, -1);
+    }
+
+    /** Key of the league team on this side, or null when the side is just Red/Blue. */
+    String leagueKey(Team team) {
+        return team == Team.RED ? redLeagueKey : blueLeagueKey;
+    }
+
+    /** "Red"/"Blue", or the league team's name. */
+    String teamName(Team team) {
+        String name = team == Team.RED ? redLeagueName : blueLeagueName;
+        return name != null ? name : team.label;
+    }
+
+    /** The team's colour as 0xRRGGBB: the league team's hex colour, or the default red/blue. */
+    int teamRgb(Team team) {
+        int rgb = team == Team.RED ? redLeagueRgb : blueLeagueRgb;
+        return rgb >= 0 ? rgb : team.color.value();
+    }
+
+    TextColor teamColor(Team team) {
+        int rgb = team == Team.RED ? redLeagueRgb : blueLeagueRgb;
+        return rgb >= 0 ? TextColor.color(rgb) : team.color;
     }
 
     Set<UUID> subs(Team team) {

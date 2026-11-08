@@ -86,6 +86,7 @@ final class HotPotatoManager implements Listener {
         private final Map<UUID, GameMode> modes = new HashMap<>();
         private final Map<UUID, ItemStack> chestplates = new HashMap<>();
         private final Map<UUID, Long> lastHit = new HashMap<>();
+        private final Map<UUID, Long> lastBoundsWarning = new HashMap<>();
         private final BossBar bar = BossBar.bossBar(Component.empty(), 1.0f, BossBar.Color.RED, BossBar.Overlay.PROGRESS);
 
         private Phase phase = Phase.COUNTDOWN;
@@ -137,6 +138,13 @@ final class HotPotatoManager implements Listener {
 
     boolean isPlaying(UUID id) {
         return byPlayer.containsKey(id);
+    }
+
+    /** Where this player's game is played (for spectators in the minigames lobby), or null if they aren't playing. */
+    MinigameArena arenaOf(UUID id) {
+        Game game = byPlayer.get(id);
+        if (game == null) return null;
+        return new MinigameArena(game.middle.clone().add(0, 3, 0), l -> game.stadium.boundsContain(l));
     }
 
     boolean ownsBall(Entity entity) {
@@ -742,21 +750,68 @@ final class HotPotatoManager implements Listener {
         }
     }
 
-    /** Nobody jumps to a player outside the arena while spectating. */
+    /**
+     * Nobody jumps to a player outside the arena while spectating, and nobody still in the game can teleport out of
+     * it (ender pearls, commands...). Moves made by plugins (the game's own, and the lobby's) are always allowed.
+     */
     @EventHandler
     public void onSpectate(PlayerTeleportEvent event) {
         Game game = byPlayer.get(event.getPlayer().getUniqueId());
-        if (game != null && spectating(game, event.getPlayer().getUniqueId())
-                && event.getCause() == PlayerTeleportEvent.TeleportCause.SPECTATE) {
+        if (game == null) return;
+        boolean spectating = spectating(game, event.getPlayer().getUniqueId());
+        if (spectating && event.getCause() == PlayerTeleportEvent.TeleportCause.SPECTATE) {
             event.setCancelled(true);
+            return;
         }
+        if (spectating || event.getCause() == PlayerTeleportEvent.TeleportCause.PLUGIN) return;
+        Location to = event.getTo();
+        if (to != null && !game.stadium.boundsContain(to)) event.setCancelled(true);
+    }
+
+    /**
+     * Players still in the game can't leave the arena while a bomb is ticking. A step over the edge is undone (and
+     * their sliding stopped); someone who is somehow already outside is put back just inside the nearest edge.
+     */
+    private void keepInside(PlayerMoveEvent event, Game game) {
+        Location from = event.getFrom();
+        Location to = event.getTo();
+        if (to == null || game.stadium.contains(to.getX(), to.getZ())) return;
+
+        Location fixed;
+        if (game.stadium.contains(from.getX(), from.getZ())) {
+            fixed = from.clone();
+        } else {
+            fixed = pulledInside(game, to);
+        }
+        fixed.setYaw(to.getYaw());
+        fixed.setPitch(to.getPitch());
+        event.setTo(fixed);
+
+        Player player = event.getPlayer();
+        Vector v = player.getVelocity();
+        player.setVelocity(new Vector(0, v.getY(), 0)); // no sliding on into the edge again
+
+        UUID id = player.getUniqueId();
+        if (game.tick - game.lastBoundsWarning.getOrDefault(id, -100L) >= 20) {
+            game.lastBoundsWarning.put(id, game.tick);
+            player.sendActionBar(Component.text("You can't leave the arena!", NamedTextColor.RED, TextDecoration.BOLD));
+        }
+    }
+
+    /** Just inside the bounds, at the edge nearest to this point. */
+    private Location pulledInside(Game game, Location outside) {
+        Location point = new Location(game.world, outside.getX(), outside.getY(), outside.getZ());
+        HotPotatoStadium.BoundsHit hit = game.stadium.nearestBoundsEdge(point);
+        if (hit == null) return new Location(game.world, game.middle.getX(), outside.getY(), game.middle.getZ());
+        // The normal points from the player to the edge, so carrying on a little further is back inside.
+        return new Location(game.world, hit.x() + hit.nx() * 0.8, outside.getY(), hit.z() + hit.nz() * 0.8);
     }
 
     private boolean spectating(Game game, UUID id) {
         return game.phase == Phase.RESULT || !game.alive.contains(id);
     }
 
-    /** Everyone is frozen in place (but can look around) during a countdown; spectators stay inside the arena. */
+    /** Everyone is frozen in place (but can look around) during a countdown; during play and as spectators, nobody leaves the arena. */
     @EventHandler
     public void onMove(PlayerMoveEvent event) {
         Game game = byPlayer.get(event.getPlayer().getUniqueId());
@@ -772,6 +827,10 @@ final class HotPotatoManager implements Listener {
                 fixed.setPitch(to.getPitch());
                 event.setTo(fixed);
             }
+            return;
+        }
+        if (game.phase == Phase.PLAY) {
+            keepInside(event, game); // the bomb is ticking: nobody leaves the arena
             return;
         }
         if (game.phase != Phase.COUNTDOWN) return;

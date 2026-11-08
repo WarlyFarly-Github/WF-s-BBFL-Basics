@@ -110,6 +110,14 @@ final class SmashManager implements Listener {
         return byPlayer.containsKey(id);
     }
 
+    /** Where this player's game is played (for spectators in the minigames lobby), or null if they aren't playing. */
+    MinigameArena arenaOf(UUID id) {
+        Game game = byPlayer.get(id);
+        if (game == null) return null;
+        return new MinigameArena(game.spawn.clone().add(0, 3, 0),
+                l -> !game.stadium.hasBounds() || game.stadium.boundsContain(l));
+    }
+
     boolean ownsBall(Entity entity) {
         for (Game game : games) {
             if (game.ball != null && game.ball.equals(entity)) return true;

@@ -24,8 +24,10 @@ import org.bukkit.event.inventory.InventoryClickEvent;
 import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
+import org.bukkit.event.player.PlayerMoveEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
+import org.bukkit.event.player.PlayerTeleportEvent;
 import org.bukkit.inventory.EquipmentSlot;
 import org.bukkit.inventory.Inventory;
 import org.bukkit.inventory.InventoryHolder;
@@ -37,10 +39,12 @@ import org.bukkit.plugin.java.JavaPlugin;
 
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -48,13 +52,16 @@ import java.util.UUID;
  * players), where a football is always there to kick around. When 2 players are waiting, a vote starts: three random
  * challenges (any except Duels, which is only played through /challenge) are put in chat and the hotbar items 1, 2 and
  * 3 vote for them. The winner starts with everyone who is
- * waiting. After a game you are back in the lobby, ready for the next vote.
+ * waiting. While a game is being played nobody votes: anyone who joins the lobby (or is knocked out) spectates it in
+ * spectator mode, kept inside the arena. When the game is over everyone, players and spectators alike, is back in the
+ * lobby (in adventure mode) for the next vote.
  */
 final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, Listener {
 
     static final int MAX_PLAYERS = 10;
     private static final int VOTE_SECONDS = 30;
     private static final int RETRY_SECONDS = 10;         // wait this long before voting again after a failed start
+    private static final int RETURN_SECONDS = 3;         // a short breather in the lobby after a game, before the next vote
     private static final int[] VOTE_SLOTS = {3, 4, 5};   // the items 1, 2 and 3
     private static final int LEAVE_SLOT = 7;            // the 9th slot belongs to the navigator
 
@@ -66,6 +73,7 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
         private final ItemStack[] savedVote = new ItemStack[3];
         private boolean hasVoteItems;
         private int vote = -1;
+        private boolean spectating; // watching the game that is being played, in spectator mode
 
         private Member(Location origin, GameMode savedMode, ItemStack savedLeave) {
             this.origin = origin;
@@ -85,6 +93,19 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
         }
     }
 
+    /** The game that the last vote started: who plays it, and where it is held (null if that can't be found). */
+    private static final class Round {
+        private final String label;
+        private final Set<UUID> players;
+        private final MinigameArena arena;
+
+        private Round(String label, Set<UUID> players, MinigameArena arena) {
+            this.label = label;
+            this.players = players;
+            this.arena = arena;
+        }
+    }
+
     private final JavaPlugin plugin;
     private final MatchManager matches;
     private final ChallengeManager challenges;
@@ -94,6 +115,7 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
     private final Map<UUID, Member> members = new LinkedHashMap<>();
     private final LobbyBall ball;
     private Vote vote;
+    private Round round; // the game being played right now, or null while the lobby is voting/waiting
     private int cooldown; // seconds before another vote may start
 
     MinigamesLobbyManager(JavaPlugin plugin, MatchManager matches, ChallengeManager challenges, LobbyManager lobbies) {
@@ -147,7 +169,14 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
 
     private void join(Player player) {
         UUID id = player.getUniqueId();
-        if (members.containsKey(id)) {
+        boolean spectate = round != null && round.arena != null; // a game is being played: watch it
+        Member existing = members.get(id);
+        if (existing != null) {
+            // Already in the lobby, but not watching the game that is on: this is how they start watching it.
+            if (spectate && !existing.spectating && !matches.isInMatch(id)) {
+                startSpectating(player, existing);
+                return;
+            }
             error(player, "You are already in the minigames lobby. Use /lobby leave or the red concrete to go back.");
             return;
         }
@@ -156,7 +185,7 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
             error(player, "The minigames lobby hasn't been set up yet.");
             return;
         }
-        if (members.size() >= MAX_PLAYERS) {
+        if (!spectate && playersInLobby() >= MAX_PLAYERS) { // spectators don't take a place
             error(player, "The minigames lobby is full (" + MAX_PLAYERS + "/" + MAX_PLAYERS + ").");
             return;
         }
@@ -166,13 +195,26 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
         }
 
         ItemStack savedLeave = player.getInventory().getItem(LEAVE_SLOT);
-        members.put(id, new Member(player.getLocation().clone(), player.getGameMode(),
-                savedLeave == null ? null : savedLeave.clone()));
-        player.teleport(lobby);
-        player.setGameMode(GameMode.ADVENTURE);
+        Member member = new Member(player.getLocation().clone(), player.getGameMode(),
+                savedLeave == null ? null : savedLeave.clone());
+        members.put(id, member);
         player.getInventory().setItem(LEAVE_SLOT, leaveItem());
 
-        Component joined = Component.text(player.getName() + " joined the minigames lobby (" + members.size() + "/" + MAX_PLAYERS + ").",
+        if (spectate) {
+            startSpectating(player, member);
+            Component watching = Component.text(player.getName() + " is spectating " + round.label + ".", NamedTextColor.GRAY);
+            for (UUID other : members.keySet()) {
+                Player p = Bukkit.getPlayer(other);
+                if (p != null && !p.getUniqueId().equals(id)) p.sendMessage(watching);
+            }
+            ball.refresh();
+            return;
+        }
+
+        player.teleport(lobby);
+        player.setGameMode(GameMode.ADVENTURE);
+
+        Component joined = Component.text(player.getName() + " joined the minigames lobby (" + playersInLobby() + "/" + MAX_PLAYERS + ").",
                 NamedTextColor.GREEN);
         for (UUID other : members.keySet()) {
             Player p = Bukkit.getPlayer(other);
@@ -182,6 +224,15 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
                 NamedTextColor.GRAY));
         ball.refresh(); // a football as soon as someone is here
         if (vote != null) showVote(player); // joined during a vote: same message and items as everyone else
+    }
+
+    /** Members who aren't just spectating: the ones who count towards the lobby's limit. */
+    private int playersInLobby() {
+        int count = 0;
+        for (Member member : members.values()) {
+            if (!member.spectating) count++;
+        }
+        return count;
     }
 
     /** Takes a player out of the lobby, back where they came from. */
@@ -271,7 +322,7 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
         List<Player> list = new ArrayList<>();
         for (UUID id : members.keySet()) {
             Player p = Bukkit.getPlayer(id);
-            if (p != null && p.isOnline() && !matches.isInMatch(id)) list.add(p);
+            if (p != null && p.isOnline() && !matches.isInMatch(id) && !members.get(id).spectating) list.add(p);
         }
         return list;
     }
@@ -279,6 +330,10 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
     private void tick() {
         ball.refresh();
         if (cooldown > 0) cooldown--;
+        if (round != null) { // a game is on: no votes until it is over
+            tickRound();
+            return;
+        }
         List<Player> waiting = waiting();
 
         if (vote == null) {
@@ -403,6 +458,7 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
             List<Player> players = new ArrayList<>(waiting.subList(0, Math.min(waiting.size(), ChallengeManager.maxPlayers(game))));
             String problem = challenges.launch(game, players);
             if (problem == null) {
+                beginRound(game, players, waiting);
                 Component started = Component.text(game.label + " won the vote and is starting!", NamedTextColor.GREEN, TextDecoration.BOLD);
                 players.forEach(p -> p.sendMessage(started));
                 return;
@@ -412,6 +468,100 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
         cooldown = RETRY_SECONDS;
         waiting.forEach(p -> p.sendMessage(Component.text("Nothing could be started. Another vote will start shortly.",
                 NamedTextColor.YELLOW)));
+    }
+
+    // ------------------------------------------------------------------ the game, spectating, and back to the lobby
+
+    /**
+     * The vote's winner has started. Everyone waiting who didn't get a place in it (a full game) spectates it, and the
+     * lobby stops voting until it is over.
+     */
+    private void beginRound(ChallengeManager.Challenge game, List<Player> players, List<Player> waiting) {
+        Set<UUID> ids = new HashSet<>();
+        for (Player p : players) ids.add(p.getUniqueId());
+        MinigameArena arena = matches.minigameArena(players.get(0).getUniqueId());
+        round = new Round(game.label, ids, arena);
+        for (Player p : waiting) {
+            Member member = members.get(p.getUniqueId());
+            if (member != null && !ids.contains(p.getUniqueId())) startSpectating(p, member);
+        }
+    }
+
+    /** While a game is on: players who are out of it start spectating, and when nobody is left playing the round ends. */
+    private void tickRound() {
+        boolean anyonePlaying = false;
+        for (UUID id : round.players) {
+            if (matches.isInMatch(id)) {
+                anyonePlaying = true;
+                break;
+            }
+        }
+        if (!anyonePlaying) {
+            endRound();
+            return;
+        }
+        for (UUID id : round.players) {
+            Member member = members.get(id);
+            Player player = Bukkit.getPlayer(id);
+            if (member == null || player == null || member.spectating || matches.isInMatch(id)) continue;
+            startSpectating(player, member); // knocked out, or left the game: watch the rest
+        }
+    }
+
+    /** Spectator mode in the arena, from where they can't leave it. Does nothing if the game's arena isn't known. */
+    private void startSpectating(Player player, Member member) {
+        if (round == null || round.arena == null || member.spectating) return;
+        member.spectating = true;
+        player.teleport(round.arena.spot());
+        player.setGameMode(GameMode.SPECTATOR);
+        player.sendMessage(Component.text("You are spectating " + round.label + ". You can't leave the arena; the game's end "
+                + "takes you back to the lobby, or use /lobby leave.", NamedTextColor.GRAY));
+    }
+
+    /** The game is over: everyone in the lobby, players and spectators, is back at the lobby (adventure mode) to vote again. */
+    private void endRound() {
+        round = null;
+        cooldown = Math.max(cooldown, RETURN_SECONDS);
+        Location lobby = lobbies.get(LobbyManager.MINIGAMES);
+        for (UUID id : new ArrayList<>(members.keySet())) {
+            Member member = members.get(id);
+            Player player = Bukkit.getPlayer(id);
+            if (member == null || player == null) continue;
+            member.spectating = false;
+            player.setGameMode(GameMode.ADVENTURE);
+            if (lobby != null) player.teleport(lobby);
+            player.sendMessage(Component.text("The game is over. Back in the lobby: the next vote starts shortly.",
+                    NamedTextColor.YELLOW));
+        }
+        ball.refresh();
+    }
+
+    /** Spectators can't leave the arena by walking out of it... */
+    @EventHandler
+    public void onSpectatorMove(PlayerMoveEvent event) {
+        if (!event.hasChangedPosition() || round == null || round.arena == null) return;
+        Member member = members.get(event.getPlayer().getUniqueId());
+        if (member == null || !member.spectating) return;
+        Location to = event.getTo();
+        if (round.arena.contains().test(to)) return;
+        if (round.arena.contains().test(event.getFrom())) {
+            Location back = event.getFrom().clone();
+            back.setYaw(to.getYaw());
+            back.setPitch(to.getPitch());
+            event.setTo(back);
+        } else {
+            event.setTo(round.arena.spot()); // somehow already outside: back to the middle
+        }
+    }
+
+    /** ...or by teleporting (clicking a player outside it, commands). Our own moves, and other plugins', are allowed. */
+    @EventHandler
+    public void onSpectatorTeleport(PlayerTeleportEvent event) {
+        if (round == null || round.arena == null || event.getTo() == null) return;
+        if (event.getCause() == PlayerTeleportEvent.TeleportCause.PLUGIN) return;
+        Member member = members.get(event.getPlayer().getUniqueId());
+        if (member == null || !member.spectating) return;
+        if (!round.arena.contains().test(event.getTo())) event.setCancelled(true);
     }
 
     // ------------------------------------------------------------------ the hotbar items

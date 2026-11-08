@@ -4,7 +4,7 @@ version: 1.3.0
 author: WarlyFarly
 main: dev.whistle.WFsBBFLBasics
 api-version: '26.3'
-softdepend: [TAB, Geyser-Spigot, floodgate]
+softdepend: [TAB, Geyser-Spigot, floodgate, Skript]
 description: Basic utilities for BBFL, including the admin Whistle and football matches.
 commands:
   bbflbasics:
@@ -17,7 +17,7 @@ commands:
     permission: whistle.give
   match:
     description: Create and manage football matches.
-    usage: /match <create|invite|stadium|start|goal|end|leave|accept|decline|watch>
+    usage: /match <create|invite|stadium|team|start|goal|end|leave|accept|decline|watch>
     permission: wfsbbfl.match
   votematch:
     description: Open the quickmatch menu, or vote for a quickmatch on a stadium.
@@ -46,6 +46,10 @@ commands:
     description: Create and edit Hot Potato arenas (operators only).
     usage: /hpstadium <create|delete|list|info|setpos|clearpos|bounds|edit|confirm>
     permission: wfsbbfl.hpstadium
+  sit:
+    description: Sit down anywhere. Press shift to get up.
+    usage: /sit
+    permission: wfsbbfl.sit
   lobby:
     description: Go to the minigames lobby, where a vote picks the next minigame.
     usage: /lobby <minigames|leave>
@@ -73,6 +77,9 @@ commands:
 permissions:
   wfsbbfl.leaderboard:
     description: Allows /leaderboard
+    default: true
+  wfsbbfl.sit:
+    description: Allows /sit
     default: true
   wfsbbfl.achievements:
     description: Allows /achievements

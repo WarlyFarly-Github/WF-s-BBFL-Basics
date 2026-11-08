@@ -108,6 +108,17 @@ final class OneBounceManager implements Listener {
         return byPlayer.containsKey(id);
     }
 
+    /** Where this player's game is played (for spectators in the minigames lobby), or null if they aren't playing. */
+    MinigameArena arenaOf(UUID id) {
+        Game game = byPlayer.get(id);
+        if (game == null) return null;
+        return new MinigameArena(game.centre.clone().add(0, 3, 0), l -> {
+            if (l.getWorld() == null || !l.getWorld().equals(game.centre.getWorld())) return false;
+            if (game.stadium != null && game.stadium.hasBounds()) return game.stadium.boundsContain(l);
+            return Math.hypot(l.getX() - game.centre.getX(), l.getZ() - game.centre.getZ()) <= game.limit;
+        });
+    }
+
     boolean ownsBall(Entity entity) {
         for (Game game : games) {
             if (game.ball != null && game.ball.equals(entity)) return true;

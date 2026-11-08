@@ -41,8 +41,13 @@ final class TeamPrefixes implements CommandExecutor, TabCompleter {
      * code, which colours the username that follows.
      */
     String tag(boolean red) {
+        return tag(red, red ? RED_NAME : BLUE_NAME);
+    }
+
+    /** As above, with the colour code for the username given (a league team uses its hex colour, like "&#ff0000"). */
+    String tag(boolean red, String nameColourCode) {
         String prefix = raw(red);
-        return (prefix.isBlank() ? "" : prefix + "&r ") + (red ? RED_NAME : BLUE_NAME);
+        return (prefix.isBlank() ? "" : prefix + "&r ") + nameColourCode;
     }
 
     /** The prefix and a space as a component, white unless it sets its own colour (for the scoreboard team fallback). */

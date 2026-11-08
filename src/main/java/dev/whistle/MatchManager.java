@@ -7,6 +7,7 @@ import net.kyori.adventure.sound.Sound;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.event.ClickEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextColor;
 import net.kyori.adventure.text.format.TextDecoration;
 import net.kyori.adventure.title.Title;
 import org.bukkit.Bukkit;
@@ -84,7 +85,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final int MAX_HALF_TIME_SECONDS = 600;
     private static final int HALF_TIME_STEP_SECONDS = 30;
     private static final List<String> SUBCOMMANDS =
-            List.of("create", "invite", "stadium", "start", "goal", "end", "leave", "accept", "decline", "watch", "sub", "cards");
+            List.of("create", "invite", "stadium", "team", "start", "goal", "end", "leave", "accept", "decline", "watch", "sub", "cards");
 
     /** team == null: a referee invite. substitute: the invite is for the team's bench rather than its main players. */
     private record Invite(UUID host, Team team, long time, boolean substitute) {}
@@ -159,6 +160,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private static final int MAX_PAGES = 64;   // the page number is the banner's stack size
 
     private final JavaPlugin plugin;
+    private final LeagueTeams leagueTeams;
     private final DiscordAnnouncer discord;
     private final StadiumManager stadiums;
     private final NamespacedKey ballKey;
@@ -293,6 +295,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     MatchManager(JavaPlugin plugin, StadiumManager stadiums) {
         this.plugin = plugin;
+        this.leagueTeams = new LeagueTeams(plugin);
         this.tabNames = new TabNameTags(plugin);
         removeScoreboardTeams(); // leftovers from a crash or a reload
         this.stadiums = stadiums;
@@ -371,7 +374,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return true;
         }
         if (args.length == 0) {
-            error(player, "Usage: /match <create|invite|stadium|start|goal|sub|cards|end|leave|accept|decline|watch>");
+            error(player, "Usage: /match <create|invite|stadium|team|start|goal|sub|cards|end|leave|accept|decline|watch>");
             return true;
         }
 
@@ -393,6 +396,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 }
             }
             case "stadium" -> chooseStadium(player, args);
+            case "team" -> setLeagueTeam(player, args);
             case "start" -> start(player);
             case "goal" -> goal(player, args);
             case "sub" -> substituteCommand(player, args);
@@ -407,7 +411,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             case "leave" -> leave(player);
             case "accept" -> accept(player);
             case "decline" -> decline(player);
-            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|start|goal|sub|cards|end|leave|accept|decline|watch>");
+            default -> error(player, "Unknown subcommand. Use /match <create|invite|stadium|team|start|goal|sub|cards|end|leave|accept|decline|watch>");
         }
         return true;
     }
@@ -444,6 +448,16 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("invite") && sender.hasPermission("wfsbbfl.match.invite.server")) {
             return "server".startsWith(args[1].toLowerCase()) ? List.of("server") : List.of();
+        }
+        if (args[0].equalsIgnoreCase("team")) {
+            if (args.length == 2) return List.of("red", "blue").stream().filter(n -> n.startsWith(args[1].toLowerCase())).toList();
+            if (args.length >= 3) {
+                String typed = String.join(" ", List.of(args).subList(2, args.length)).toLowerCase();
+                List<String> options = new ArrayList<>(leagueTeams.names());
+                options.add("none");
+                return options.stream().filter(n -> n.toLowerCase().startsWith(typed)).toList();
+            }
+            return List.of();
         }
         if (args.length == 2 && args[0].equalsIgnoreCase("stadium")) {
             return stadiums.names().stream().filter(n -> n.toLowerCase().startsWith(args[1].toLowerCase())).toList();
@@ -570,6 +584,27 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return true;
     }
 
+    /**
+     * Where the minigame this player is playing is held (the spot spectators are sent to, and the area they must stay
+     * in), or null if they aren't playing a minigame. Covers every game the minigames lobby can start, Roulette too.
+     */
+    MinigameArena minigameArena(UUID id) {
+        MinigameArena arena = null;
+        if (smash != null) arena = smash.arenaOf(id);
+        if (arena == null && oneBounce != null) arena = oneBounce.arenaOf(id);
+        if (arena == null && colorCover != null) arena = colorCover.arenaOf(id);
+        if (arena == null && hotPotato != null) arena = hotPotato.arenaOf(id);
+        if (arena == null) {
+            Match match = matchByPlayer.get(id);
+            if (match != null && match.stadium != null && match.stadium.hasCenter()) { // Roulette: a football match
+                Stadium stadium = match.stadium;
+                arena = new MinigameArena(stadium.center.clone().add(0, 3, 0),
+                        l -> !stadium.hasBounds() || stadium.boundsContain(l));
+            }
+        }
+        return arena;
+    }
+
     /** Playing in a football match or in a Smash game. */
     boolean isInMatch(UUID id) {
         return matchByPlayer.containsKey(id) || (smash != null && smash.isPlaying(id))
@@ -663,12 +698,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                         .append(Component.text(".", NamedTextColor.GREEN)));
             } else if (rouletteMode) {
                 p.sendMessage(Component.text("Roulette has started! You are on the ", NamedTextColor.GREEN)
-                        .append(Component.text(team.label, team.color, TextDecoration.BOLD))
+                        .append(Component.text(match.teamName(team), match.teamColor(team), TextDecoration.BOLD))
                         .append(Component.text(" team. Every 30 seconds everyone gets a random power: some help, some hurt!",
                                 NamedTextColor.GREEN)));
             } else {
                 p.sendMessage(Component.text("The quickmatch has started! You are on the ", NamedTextColor.GREEN)
-                        .append(Component.text(team.label, team.color, TextDecoration.BOLD))
+                        .append(Component.text(match.teamName(team), match.teamColor(team), TextDecoration.BOLD))
                         .append(Component.text(" team.", NamedTextColor.GREEN)));
             }
         }
@@ -754,12 +789,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private void removeGoal(Match match, Team team, Player official) {
         int score = team == Team.RED ? match.redScore : match.blueScore;
         if (score <= 0) {
-            error(official, "The " + team.label + " team has no goals to remove.");
+            error(official, "The " + match.teamName(team) + " team has no goals to remove.");
             return;
         }
         match.removeGoal(team);
         Component message = Component.text(official.getName() + " removed a goal from the ", NamedTextColor.YELLOW)
-                .append(Component.text(team.label + " team", team.color))
+                .append(Component.text(match.teamName(team) + " team", match.teamColor(team)))
                 .append(Component.text(". Score: " + match.redScore + " - " + match.blueScore, NamedTextColor.YELLOW));
         for (Player p : everyoneIn(match)) p.sendMessage(message);
     }
@@ -789,10 +824,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         // The title stays up for the whole freeze; the countdown itself runs on the action bar.
         Component headline = ownGoal
-                ? Component.text("Own Goal!", match.duel ? NamedTextColor.GOLD : team.color, TextDecoration.BOLD)
+                ? Component.text("Own Goal!", match.duel ? NamedTextColor.GOLD : match.teamColor(team), TextDecoration.BOLD)
                 : match.duel
                 ? Component.text("Goal!", NamedTextColor.GOLD, TextDecoration.BOLD)
-                : Component.text(team.label + " Goal!", team.color, TextDecoration.BOLD);
+                : Component.text(match.teamName(team) + " Goal!", match.teamColor(team), TextDecoration.BOLD);
         Title title = Title.title(
                 headline,
                 Component.text(subtitleText, NamedTextColor.WHITE),
@@ -930,6 +965,65 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         applyStadium(host, match, stadium);
     }
 
+    /**
+     * /match team <red|blue> <league team|none>: makes a side one of the teams from the league script. Its name and
+     * hex colour then replace "Red"/"Blue" in this match (jerseys, name tags, menus and messages).
+     */
+    private void setLeagueTeam(Player host, String[] args) {
+        Match match = hostedMatch(host);
+        if (match == null) return;
+        if (args.length < 3 || !(args[1].equalsIgnoreCase("red") || args[1].equalsIgnoreCase("blue"))) {
+            error(host, "Usage: /match team <red|blue> <league team name|none>");
+            return;
+        }
+        if (match.duel || match.quick) {
+            error(host, "League teams can only be used in league matches, not quickmatches or duels.");
+            return;
+        }
+        if (match.started) {
+            error(host, "Teams can only be set before the match starts.");
+            return;
+        }
+        Team side = args[1].equalsIgnoreCase("red") ? Team.RED : Team.BLUE;
+        Team other = side == Team.RED ? Team.BLUE : Team.RED;
+        String typed = String.join(" ", List.of(args).subList(2, args.length));
+
+        if (typed.equalsIgnoreCase("none")) {
+            match.clearLeagueTeam(side);
+        } else {
+            if (!leagueTeams.available()) {
+                error(host, "League teams aren't available: Skript isn't running on this server.");
+                return;
+            }
+            LeagueTeams.LeagueTeam league = leagueTeams.find(typed);
+            if (league == null) {
+                error(host, "No league team called " + typed + ". Teams are created with /team-create in Discord.");
+                return;
+            }
+            if (league.key().equals(match.leagueKey(other))) {
+                error(host, league.name() + " is already the " + other.label.toLowerCase() + " team in this match.");
+                return;
+            }
+            match.setLeagueTeam(side, league.key(), league.name(), league.rgb());
+        }
+
+        // Players who already joined have their jersey and name colour updated to match
+        for (Team team : Team.values()) {
+            List<UUID> everyone = new ArrayList<>(match.teamSet(team));
+            everyone.addAll(match.subs(team));
+            for (UUID id : everyone) {
+                Player p = Bukkit.getPlayer(id);
+                if (p != null && isJersey(p.getInventory().getChestplate())) giveJersey(match, p);
+            }
+        }
+        match.broadcast(Component.text("The ", NamedTextColor.GRAY)
+                .append(Component.text(side.label.toLowerCase() + " side", match.teamColor(side)))
+                .append(Component.text(typed.equalsIgnoreCase("none") ? " is now just " + side.label + "." : " is now ",
+                        NamedTextColor.GRAY))
+                .append(typed.equalsIgnoreCase("none") ? Component.empty()
+                        : Component.text(match.teamName(side), match.teamColor(side), TextDecoration.BOLD)));
+    }
+
     private void applyStadium(Player host, Match match, Stadium stadium) {
         List<String> missing = stadium.missingParts();
         if (!missing.isEmpty()) {
@@ -1016,7 +1110,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (invite.substitute()) {
             Team team = invite.team();
             if (match.subs(team).size() >= Match.MAX_SUBS_PER_TEAM) {
-                error(player, "The " + team.label + " team already has " + Match.MAX_SUBS_PER_TEAM + " substitutes.");
+                error(player, "The " + match.teamName(team) + " team already has " + Match.MAX_SUBS_PER_TEAM + " substitutes.");
                 return;
             }
             match.subs(team).add(player.getUniqueId());
@@ -1024,14 +1118,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             giveSubKit(match, player);
             match.broadcast(Component.text(player.getName(), NamedTextColor.YELLOW)
                     .append(Component.text(" joined as a ", NamedTextColor.GRAY))
-                    .append(Component.text(team.label + " substitute", team.color))
+                    .append(Component.text(match.teamName(team) + " substitute", match.teamColor(team)))
                     .append(Component.text(".", NamedTextColor.GRAY)));
-            player.sendMessage(Component.text("You are a " + team.label + " substitute. Wait on the side: a referee "
+            player.sendMessage(Component.text("You are a " + match.teamName(team) + " substitute. Wait on the side: a referee "
                     + "will sub you on.", NamedTextColor.GREEN));
             return;
         }
         if (match.isFull(invite.team())) {
-            error(player, "The " + invite.team().label + " team is full!");
+            error(player, "The " + match.teamName(invite.team()) + " team is full!");
             return;
         }
 
@@ -1045,7 +1139,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         match.broadcast(Component.text(player.getName(), NamedTextColor.YELLOW)
                 .append(Component.text(" joined the ", NamedTextColor.GRAY))
-                .append(Component.text(invite.team().label + " team", invite.team().color))
+                .append(Component.text(match.teamName(invite.team()) + " team", match.teamColor(invite.team())))
                 .append(Component.text(" (" + match.size(invite.team()) + "/" + Match.MAX_PER_TEAM + ")", NamedTextColor.GRAY)));
     }
 
@@ -1078,15 +1172,15 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     // ------------------------------------------------------------------ menus
 
-    private static Component plain(String text, NamedTextColor color) {
+    private static Component plain(String text, TextColor color) {
         return Component.text(text, color).decoration(TextDecoration.ITALIC, false);
     }
 
-    private static Component bold(String text, NamedTextColor color) {
+    private static Component bold(String text, TextColor color) {
         return Component.text(text, color, TextDecoration.BOLD).decoration(TextDecoration.ITALIC, false);
     }
 
-    private ItemStack button(Material material, String name, NamedTextColor color, Component... lore) {
+    private ItemStack button(Material material, String name, TextColor color, Component... lore) {
         ItemStack item = new ItemStack(material);
         ItemMeta meta = item.getItemMeta();
         meta.displayName(bold(name, color));
@@ -1194,15 +1288,15 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private ItemStack teamItem(Match match, Team team) {
-        return teamItem(match, team, team.label + " Team", team.color,
+        return teamItem(match, team, match.teamName(team) + " Team", match.teamColor(team),
                 plain(match.size(team) + "/" + Match.MAX_PER_TEAM + " players", NamedTextColor.GRAY));
     }
 
     /** A chestplate in the team's colour with a custom name and lore. */
-    private ItemStack teamItem(Match match, Team team, String name, NamedTextColor nameColor, Component... lore) {
+    private ItemStack teamItem(Match match, Team team, String name, TextColor nameColor, Component... lore) {
         ItemStack item = button(Material.LEATHER_CHESTPLATE, name, nameColor, lore);
         LeatherArmorMeta meta = (LeatherArmorMeta) item.getItemMeta();
-        meta.setColor(Color.fromRGB(team.color.value()));
+        meta.setColor(Color.fromRGB(match.teamRgb(team)));
         meta.addItemFlags(ItemFlag.HIDE_DYE);
         item.setItemMeta(meta);
         return item;
@@ -1218,12 +1312,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         if (match == null) return;
 
         MenuGui holder = new MenuGui(MenuType.TEAM_ROLE, 0, 0, team);
-        Inventory inventory = newMenu(holder, team.label + " Team");
+        Inventory inventory = newMenu(holder, match.teamName(team) + " Team");
         inventory.setItem(SLOT_LEFT, teamItem(match, team, "Main", NamedTextColor.WHITE,
                 plain(match.size(team) + "/" + Match.MAX_PER_TEAM + " players", NamedTextColor.GRAY),
                 plain("Click to invite a main player.", NamedTextColor.GRAY)));
         // A bench: where the players waiting to be subbed on sit.
-        inventory.setItem(SLOT_RIGHT, button(Material.OAK_STAIRS, "Substitute", team.color,
+        inventory.setItem(SLOT_RIGHT, button(Material.OAK_STAIRS, "Substitute", match.teamColor(team),
                 plain(match.subs(team).size() + "/" + Match.MAX_SUBS_PER_TEAM + " substitutes", NamedTextColor.GRAY),
                 plain("Click to invite or sub on a substitute.", NamedTextColor.GRAY)));
         inventory.setItem(SLOT_BACK, backButton());
@@ -1237,9 +1331,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         MenuGui holder = new MenuGui(MenuType.SUB_TEAMS, 0, 0, null);
         Inventory inventory = newMenu(holder, "Substitutions");
-        inventory.setItem(SLOT_LEFT, teamItem(match, Team.RED, Team.RED.label + " Team", Team.RED.color,
+        inventory.setItem(SLOT_LEFT, teamItem(match, Team.RED, match.teamName(Team.RED) + " Team", match.teamColor(Team.RED),
                 plain(match.subs(Team.RED).size() + " substitutes", NamedTextColor.GRAY)));
-        inventory.setItem(SLOT_RIGHT, teamItem(match, Team.BLUE, Team.BLUE.label + " Team", Team.BLUE.color,
+        inventory.setItem(SLOT_RIGHT, teamItem(match, Team.BLUE, match.teamName(Team.BLUE) + " Team", match.teamColor(Team.BLUE),
                 plain(match.subs(Team.BLUE).size() + " substitutes", NamedTextColor.GRAY)));
         inventory.setItem(SLOT_BACK, backButton());
         player.openInventory(inventory);
@@ -1303,13 +1397,13 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         MenuGui holder = new MenuGui(type, page, pages, team, substitute, incoming);
         String title = switch (type) {
             case STADIUMS -> "Choose Stadium";
-            case SUBS -> team.label + " Substitutes";
+            case SUBS -> match.teamName(team) + " Substitutes";
             case SUB_OUT -> {
                 Player in = incoming == null ? null : Bukkit.getPlayer(incoming);
                 yield "Take off for " + (in == null ? "the substitute" : in.getName());
             }
             default -> team == null ? "Invite a Referee"
-                    : substitute ? "Invite a " + team.label + " Substitute" : "Invite to " + team.label + " Team";
+                    : substitute ? "Invite a " + match.teamName(team) + " Substitute" : "Invite to " + match.teamName(team) + " Team";
         };
         Inventory inventory = newMenu(holder, title);
 
@@ -1321,7 +1415,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         if (type == MenuType.SUBS && host.getUniqueId().equals(match.host)) {
             inventory.setItem(SLOT_INVITE_SUB, button(Material.EMERALD, "Invite Substitute", NamedTextColor.GREEN,
-                    plain("Invite a player as a " + team.label + " substitute.", NamedTextColor.GRAY)));
+                    plain("Invite a player as a " + match.teamName(team) + " substitute.", NamedTextColor.GRAY)));
         }
         inventory.setItem(SLOT_PREVIOUS, arrowBanner("Previous Page", false));
         inventory.setItem(SLOT_PAGE, pageMarker(page, pages));
@@ -1639,22 +1733,22 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         }
         if (substitute) {
             if (match.subs(team).size() >= Match.MAX_SUBS_PER_TEAM) {
-                error(host, "The " + team.label + " team already has " + Match.MAX_SUBS_PER_TEAM + " substitutes.");
+                error(host, "The " + match.teamName(team) + " team already has " + Match.MAX_SUBS_PER_TEAM + " substitutes.");
                 return;
             }
             invites.put(target.getUniqueId(), new Invite(host.getUniqueId(), team, System.currentTimeMillis(), true));
             target.sendMessage(Component.text(host.getName(), NamedTextColor.YELLOW)
                     .append(Component.text(" invited you to be a substitute for the ", NamedTextColor.GRAY))
-                    .append(Component.text(team.label + " team", team.color))
+                    .append(Component.text(match.teamName(team) + " team", match.teamColor(team)))
                     .append(Component.text(". ", NamedTextColor.GRAY))
                     .append(BedrockSupport.respondButtons(target, "/match")));
             host.sendMessage(Component.text("Invited " + target.getName() + " as a ", NamedTextColor.GREEN)
-                    .append(Component.text(team.label + " substitute", team.color))
+                    .append(Component.text(match.teamName(team) + " substitute", match.teamColor(team)))
                     .append(Component.text(".", NamedTextColor.GREEN)));
             return;
         }
         if (match.isFull(team)) {
-            error(host, "The " + team.label + " team is full (" + Match.MAX_PER_TEAM + "/" + Match.MAX_PER_TEAM + ").");
+            error(host, "The " + match.teamName(team) + " team is full (" + Match.MAX_PER_TEAM + "/" + Match.MAX_PER_TEAM + ").");
             return;
         }
 
@@ -1662,12 +1756,12 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         target.sendMessage(Component.text(host.getName(), NamedTextColor.YELLOW)
                 .append(Component.text(" invited you to the ", NamedTextColor.GRAY))
-                .append(Component.text(team.label + " team", team.color))
+                .append(Component.text(match.teamName(team) + " team", match.teamColor(team)))
                 .append(Component.text(" in a football match. ", NamedTextColor.GRAY))
                 .append(BedrockSupport.respondButtons(target, "/match")));
 
         host.sendMessage(Component.text("Invited " + target.getName() + " to the ", NamedTextColor.GREEN)
-                .append(Component.text(team.label + " team", team.color))
+                .append(Component.text(match.teamName(team) + " team", match.teamColor(team)))
                 .append(Component.text(".", NamedTextColor.GREEN)));
     }
 
@@ -2122,11 +2216,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     // ------------------------------------------------------------------ team jerseys
 
-    private ItemStack createJersey(Team team) {
+    private ItemStack createJersey(Match match, Team team) {
         ItemStack item = new ItemStack(Material.LEATHER_CHESTPLATE);
         LeatherArmorMeta meta = (LeatherArmorMeta) item.getItemMeta();
-        meta.setColor(Color.fromRGB(team.color.value()));
-        meta.displayName(Component.text(team.label + " Team Jersey", team.color, TextDecoration.BOLD)
+        meta.setColor(Color.fromRGB(match.teamRgb(team)));
+        meta.displayName(Component.text(match.teamName(team) + " Team Jersey", match.teamColor(team), TextDecoration.BOLD)
                 .decoration(TextDecoration.ITALIC, false));
         meta.setUnbreakable(true);
         meta.getPersistentDataContainer().set(jerseyKey, PersistentDataType.BYTE, (byte) 1);
@@ -2146,8 +2240,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             ItemStack current = player.getInventory().getChestplate();
             match.savedChestplates.putIfAbsent(player.getUniqueId(),
                     current == null || isJersey(current) ? new ItemStack(Material.AIR) : current);
-            player.getInventory().setChestplate(createJersey(match.teamOf(player.getUniqueId())));
-            applyNameColor(player, match.teamOf(player.getUniqueId()));
+            player.getInventory().setChestplate(createJersey(match, match.teamOf(player.getUniqueId())));
+            applyNameColor(player, match, match.teamOf(player.getUniqueId()));
         }
 
         // Everyone plays in adventure mode (no breaking or placing blocks); the old mode comes back afterwards.
@@ -2173,22 +2267,33 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     }
 
     private boolean isOurScoreboardTeam(org.bukkit.scoreboard.Team team) {
-        return team.getName().equals(RED_SCOREBOARD_TEAM) || team.getName().equals(BLUE_SCOREBOARD_TEAM);
+        // bbfl_red / bbfl_blue, and bbfl_red_ff0000 style ones for league teams (one per colour, so two matches with
+        // different league teams don't fight over the same scoreboard team)
+        return team.getName().startsWith(RED_SCOREBOARD_TEAM) || team.getName().startsWith(BLUE_SCOREBOARD_TEAM);
     }
 
     /** Colours the player's name tag with their team colour: through TAB if it is installed, otherwise a scoreboard team. */
-    private void applyNameColor(Player player, Team team) {
+    private void applyNameColor(Player player, Match match, Team team) {
         // With TAB, set a temporary name tag prefix (set by operators with /setprefix, then a space) instead of
-        // using a scoreboard team.
+        // using a scoreboard team. A league team colours the name with its exact hex colour.
         boolean red = team == Team.RED;
-        String tag = prefixes != null ? prefixes.tag(red) : (red ? "&c" : "&9");
+        boolean league = match.leagueKey(team) != null;
+        String nameCode = league ? "&#" + LeagueTeams.hex(match.teamRgb(team)) : (red ? "&c" : "&9");
+        String tag = prefixes != null ? prefixes.tag(red, nameCode) : nameCode;
         if (tabNames.isPresent() && tabNames.setPrefix(player, tag)) return;
 
+        // Without TAB: a scoreboard team, which can only colour a name with one of the 16 vanilla colours, so a
+        // league team gets the closest one.
         Scoreboard board = mainScoreboard();
-        String teamName = team == Team.RED ? RED_SCOREBOARD_TEAM : BLUE_SCOREBOARD_TEAM;
+        String teamName = red ? RED_SCOREBOARD_TEAM : BLUE_SCOREBOARD_TEAM;
+        NamedTextColor nameColor = red ? NamedTextColor.RED : NamedTextColor.BLUE;
+        if (league) {
+            teamName += "_" + LeagueTeams.hex(match.teamRgb(team));
+            nameColor = NamedTextColor.nearestTo(match.teamColor(team));
+        }
         org.bukkit.scoreboard.Team ours = board.getTeam(teamName);
         if (ours == null) ours = board.registerNewTeam(teamName);
-        ours.color(team.color);
+        ours.color(nameColor);
         ours.prefix(prefixes != null ? prefixes.component(red) : Component.empty());
 
         org.bukkit.scoreboard.Team current = board.getEntryTeam(player.getName());
@@ -2215,9 +2320,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private void removeScoreboardTeams() {
         Scoreboard board = mainScoreboard();
-        for (String name : List.of(RED_SCOREBOARD_TEAM, BLUE_SCOREBOARD_TEAM)) {
-            org.bukkit.scoreboard.Team team = board.getTeam(name);
-            if (team != null) team.unregister();
+        for (org.bukkit.scoreboard.Team team : new ArrayList<>(board.getTeams())) {
+            if (isOurScoreboardTeam(team)) team.unregister();
         }
         previousScoreboardTeams.clear();
     }
@@ -2355,7 +2459,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 if (player == null) continue;
                 ItemStack head = createHead(player, yellow ? "Click to show a yellow card" : "Click to show a red card");
                 SkullMeta meta = (SkullMeta) head.getItemMeta();
-                meta.lore(List.of(plain(team.label + " team", team.color),
+                meta.lore(List.of(plain(match.teamName(team) + " team", match.teamColor(team)),
                         plain("Yellow cards: " + match.yellows.getOrDefault(id, 0), NamedTextColor.GRAY),
                         plain(yellow ? "Click to show a yellow card" : "Click to show a red card", NamedTextColor.YELLOW)));
                 head.setItemMeta(meta);
@@ -2363,8 +2467,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             }
         }
         inventory.setItem(13, createCardItem(card));
-        inventory.setItem(7, teamItem(match, Team.RED, "Red Team", Team.RED.color));
-        inventory.setItem(25, teamItem(match, Team.BLUE, "Blue Team", Team.BLUE.color));
+        inventory.setItem(7, teamItem(match, Team.RED, match.teamName(Team.RED) + " Team", match.teamColor(Team.RED)));
+        inventory.setItem(25, teamItem(match, Team.BLUE, match.teamName(Team.BLUE) + " Team", match.teamColor(Team.BLUE)));
         inventory.setItem(SLOT_BACK, backButton());
         referee.openInventory(inventory);
     }
@@ -2406,9 +2510,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return;
         }
         showCardTitle(match, Title.title(Component.text("Yellow Card", NamedTextColor.YELLOW),
-                Component.text(target.getName() + " (" + team.label + " team)")), "block.note_block.pling");
+                Component.text(target.getName() + " (" + match.teamName(team) + " team)")), "block.note_block.pling");
         match.broadcast(Component.text(referee.getName() + " showed a yellow card to ", NamedTextColor.YELLOW)
-                .append(Component.text(target.getName(), team.color))
+                .append(Component.text(target.getName(), match.teamColor(team)))
                 .append(Component.text(". (1/2)", NamedTextColor.YELLOW)));
         target.sendMessage(Component.text("One more yellow card and you are sent off.", NamedTextColor.YELLOW));
     }
@@ -2429,10 +2533,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         giveSubKit(match, target); // up to the stands. They aren't a substitute, so they can't be subbed back on
 
         showCardTitle(match, Title.title(Component.text("Red Card", NamedTextColor.RED),
-                Component.text(target.getName() + " (" + team.label + " team)"
+                Component.text(target.getName() + " (" + match.teamName(team) + " team)"
                         + (secondYellow ? " - second yellow" : ""))), "entity.wither.hurt");
         match.broadcast(Component.text(referee.getName() + " sent off ", NamedTextColor.RED)
-                .append(Component.text(target.getName(), team.color))
+                .append(Component.text(target.getName(), match.teamColor(team)))
                 .append(Component.text(secondYellow ? " for a second yellow card." : " with a red card.", NamedTextColor.RED)));
 
         if (replace) {
@@ -2449,10 +2553,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             later(() -> openPagedMenu(referee, MenuType.SUBS, 1, team, false, null)); // sub on a new player
         } else if (isFirstHalf(match)) {
             match.returnAtHalfTime.add(id);
-            match.broadcast(Component.text("Nobody can be subbed on, so the " + team.label + " team plays a player short "
+            match.broadcast(Component.text("Nobody can be subbed on, so the " + match.teamName(team) + " team plays a player short "
                     + "until half time.", NamedTextColor.YELLOW));
         } else {
-            match.broadcast(Component.text("Nobody can be subbed on, so the " + team.label + " team plays a player short "
+            match.broadcast(Component.text("Nobody can be subbed on, so the " + match.teamName(team) + " team plays a player short "
                     + "for the rest of the match.", NamedTextColor.YELLOW));
         }
     }
@@ -2471,7 +2575,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return false;
         }
         if (match.isFull(team)) {
-            error(official, "The " + team.label + " team is full.");
+            error(official, "The " + match.teamName(team) + " team is full.");
             return false;
         }
 
@@ -2490,7 +2594,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         player.showTitle(Title.title(Component.text("You're back on!", NamedTextColor.GREEN),
                 Component.text("Brought on by " + official.getName())));
         Component message = Component.text(official.getName() + " brought ", NamedTextColor.YELLOW)
-                .append(Component.text(player.getName(), team.color))
+                .append(Component.text(player.getName(), match.teamColor(team)))
                 .append(Component.text(" back on.", NamedTextColor.YELLOW));
         for (Player p : everyoneIn(match)) p.sendMessage(message);
         return true;
@@ -2506,7 +2610,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             match.sentOff.remove(id);
             if (match.isFull(team)) {
                 match.sentOff.put(id, team); // someone took their place in the meantime: they stay off
-                player.sendMessage(Component.text("The " + team.label + " team is full, so you stay off.", NamedTextColor.YELLOW));
+                player.sendMessage(Component.text("The " + match.teamName(team) + " team is full, so you stay off.", NamedTextColor.YELLOW));
                 continue;
             }
             leaveStands(player, false);
@@ -2607,7 +2711,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         Match.Vacancy vacancy = match.vacancyFor(team);
         Player in = inId == null ? null : Bukkit.getPlayer(inId);
         if (vacancy == null) {
-            error(official, "The " + team.label + " team has no empty spot.");
+            error(official, "The " + match.teamName(team) + " team has no empty spot.");
             return false;
         }
         if (in == null || match.benchTeamOf(inId) != team) {
@@ -2630,7 +2734,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         in.showTitle(Title.title(Component.text("You're on!", NamedTextColor.GREEN),
                 Component.text("Taking " + vacancy.name() + "'s place")));
         Component message = Component.text(official.getName() + " subbed ", NamedTextColor.YELLOW)
-                .append(Component.text(in.getName(), team.color))
+                .append(Component.text(in.getName(), match.teamColor(team)))
                 .append(Component.text(" on for " + vacancy.name() + (vacancy.sentOffId() == null
                         ? ", who disconnected." : ", who was sent off."), NamedTextColor.YELLOW));
         for (Player p : everyoneIn(match)) p.sendMessage(message);
@@ -2719,11 +2823,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
             return false;
         }
         if (match.benchTeamOf(inId) != team) {
-            error(official, in.getName() + " isn't a " + team.label + " substitute or a sent-off " + team.label + " player.");
+            error(official, in.getName() + " isn't a " + match.teamName(team) + " substitute or a sent-off " + match.teamName(team) + " player.");
             return false;
         }
         if (!match.teamSet(team).contains(out.getUniqueId())) {
-            error(official, out.getName() + " isn't playing for the " + team.label + " team.");
+            error(official, out.getName() + " isn't playing for the " + match.teamName(team) + " team.");
             return false;
         }
 
@@ -2749,9 +2853,9 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         out.showTitle(Title.title(Component.text("Substituted off", NamedTextColor.YELLOW),
                 Component.text("Replaced by " + in.getName())));
         Component message = Component.text(official.getName() + " substituted ", NamedTextColor.YELLOW)
-                .append(Component.text(out.getName(), team.color))
+                .append(Component.text(out.getName(), match.teamColor(team)))
                 .append(Component.text(" off for ", NamedTextColor.YELLOW))
-                .append(Component.text(in.getName(), team.color))
+                .append(Component.text(in.getName(), match.teamColor(team)))
                 .append(Component.text(".", NamedTextColor.YELLOW));
         for (Player p : everyoneIn(match)) p.sendMessage(message);
         return true;
@@ -2897,10 +3001,10 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
         Component redLine = match.duel
                 ? Component.text(match.duelName(Team.RED) + ": ", NamedTextColor.GOLD)
-                : Component.text("Red Team: ", NamedTextColor.RED);
+                : Component.text(match.teamName(Team.RED) + " Team: ", match.teamColor(Team.RED));
         Component blueLine = match.duel
                 ? Component.text(match.duelName(Team.BLUE) + ": ", NamedTextColor.GOLD)
-                : Component.text("Blue Team: ", NamedTextColor.BLUE);
+                : Component.text(match.teamName(Team.BLUE) + " Team: ", match.teamColor(Team.BLUE));
         Component overview = Component.text("Overview:", NamedTextColor.GOLD, TextDecoration.BOLD)
                 .appendNewline()
                 .append(redLine.append(Component.text(match.redScore, NamedTextColor.WHITE)))
@@ -2979,7 +3083,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                     .append(Component.text(" has won by " + diff + (diff == 1 ? " goal!" : " goals!"),
                             NamedTextColor.YELLOW, TextDecoration.BOLD));
         }
-        return Component.text(winner.label, winner.color, TextDecoration.BOLD)
+        return Component.text(match.teamName(winner), match.teamColor(winner), TextDecoration.BOLD)
                 .append(Component.text(" has won by " + diff + (diff == 1 ? " goal!" : " goals!"),
                         NamedTextColor.YELLOW, TextDecoration.BOLD));
     }
