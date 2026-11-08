@@ -42,10 +42,13 @@ final class NavigatorManager implements Listener {
 
     static final int SLOT = 8; // the 9th slot of the hotbar
 
-    private static final int SLOT_QUICKMATCH = 10;
-    private static final int SLOT_MINIGAMES = 12;
-    private static final int SLOT_TRAINING = 14;
-    private static final int SLOT_STADIUMS = 16;
+    // Laid out like the Select Challenge menu: four buttons spaced along the top row, two in the bottom row.
+    private static final int SLOT_QUICKMATCH = 1;
+    private static final int SLOT_MINIGAMES = 3;
+    private static final int SLOT_TRAINING = 5;
+    private static final int SLOT_STADIUMS = 7;
+    private static final int SLOT_CHALLENGES = 21;
+    private static final int SLOT_LEADERBOARD = 23;
 
     private static final class Gui implements InventoryHolder {
         private Inventory inventory;
@@ -74,7 +77,7 @@ final class NavigatorManager implements Listener {
         meta.displayName(Component.text("Navigator", NamedTextColor.GOLD, TextDecoration.BOLD)
                 .decoration(TextDecoration.ITALIC, false));
         meta.lore(List.of(Component.text("Right-click to open the menu:", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false),
-                Component.text("quickmatch, minigames, training and stadiums.", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false)));
+                Component.text("quickmatch, minigames, challenges, training, stadiums and leaderboards.", NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false)));
         meta.addItemFlags(ItemFlag.HIDE_ADDITIONAL_TOOLTIP);
         meta.getPersistentDataContainer().set(itemKey, PersistentDataType.BYTE, (byte) 1);
         item.setItemMeta(meta);
@@ -185,6 +188,10 @@ final class NavigatorManager implements Listener {
                 "Practise on your own: Free Play and Dodge.", "/training"));
         inventory.setItem(SLOT_STADIUMS, button(Material.MAP, "Stadium List",
                 "See every stadium and who built it.", "/stadium list"));
+        inventory.setItem(SLOT_CHALLENGES, button(Material.TARGET, "Challenges",
+                "Pick a challenge and invite players to it.", "/challenge"));
+        inventory.setItem(SLOT_LEADERBOARD, button(Material.GOLD_INGOT, "Leaderboard",
+                "All-time stats: quickest goal, wins, win %, goals and time played.", "/leaderboard"));
         player.openInventory(inventory);
     }
 
@@ -206,6 +213,8 @@ final class NavigatorManager implements Listener {
             case SLOT_MINIGAMES -> "lobby minigames";
             case SLOT_TRAINING -> "training";
             case SLOT_STADIUMS -> "stadium list";
+            case SLOT_CHALLENGES -> "challenge";
+            case SLOT_LEADERBOARD -> "leaderboard";
             default -> null;
         };
         if (command == null) return;

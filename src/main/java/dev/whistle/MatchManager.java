@@ -2882,6 +2882,11 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     private void endMatch(Match match, String reason) {
         announceToDiscord(match, !match.started); // ended before kick-off counts as cancelled
+        if (leaderboard != null && match.fullTime) { // played to a result: counts as a match for everyone, for the win percentage
+            for (Team team : Team.values()) {
+                for (UUID id : match.teamSet(team)) leaderboard.recordMatchPlayed(id);
+            }
+        }
         if (leaderboard != null && match.fullTime && match.redScore != match.blueScore) {
             Team winning = match.redScore > match.blueScore ? Team.RED : Team.BLUE;
             for (UUID id : match.teamSet(winning)) leaderboard.recordWin(id);

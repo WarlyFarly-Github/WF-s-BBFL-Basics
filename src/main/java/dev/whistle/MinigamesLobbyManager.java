@@ -15,16 +15,20 @@ import org.bukkit.command.CommandSender;
 import org.bukkit.command.TabCompleter;
 import org.bukkit.entity.Player;
 import org.bukkit.event.EventHandler;
+import org.bukkit.event.EventPriority;
 import org.bukkit.event.Listener;
 import org.bukkit.event.block.Action;
 import org.bukkit.event.entity.EntityDamageEvent;
 import org.bukkit.event.entity.FoodLevelChangeEvent;
 import org.bukkit.event.inventory.InventoryClickEvent;
+import org.bukkit.event.inventory.InventoryDragEvent;
 import org.bukkit.event.player.PlayerDropItemEvent;
 import org.bukkit.event.player.PlayerInteractEvent;
 import org.bukkit.event.player.PlayerQuitEvent;
 import org.bukkit.event.player.PlayerSwapHandItemsEvent;
 import org.bukkit.inventory.EquipmentSlot;
+import org.bukkit.inventory.Inventory;
+import org.bukkit.inventory.InventoryHolder;
 import org.bukkit.inventory.ItemFlag;
 import org.bukkit.inventory.ItemStack;
 import org.bukkit.inventory.meta.ItemMeta;
@@ -122,6 +126,7 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
         String sub = args.length == 0 ? "" : args[0].toLowerCase();
         switch (sub) {
             case "minigames" -> join(player);
+            case "menu" -> openJoinMenu(player); // for the minigames NPC: asks first, then joins
             case "leave" -> {
                 if (!members.containsKey(player.getUniqueId())) error(player, "You aren't in the minigames lobby.");
                 else if (matches.isInMatch(player.getUniqueId())) error(player, "Finish your game first (/match leave).");
@@ -135,7 +140,7 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (args.length == 1) {
-            return List.of("minigames", "leave").stream().filter(s -> s.startsWith(args[0].toLowerCase())).toList();
+            return List.of("minigames", "menu", "leave").stream().filter(s -> s.startsWith(args[0].toLowerCase())).toList();
         }
         return List.of();
     }
@@ -197,6 +202,66 @@ final class MinigamesLobbyManager implements CommandExecutor, TabCompleter, List
     public void onQuit(PlayerQuitEvent event) {
         UUID id = event.getPlayer().getUniqueId();
         if (members.containsKey(id)) leave(id, true); // otherwise they'd log back in standing in the lobby
+    }
+
+    // ------------------------------------------------------------------ the join menu (the minigames NPC)
+
+    private static final int MENU_YES_SLOT = 11;
+    private static final int MENU_NO_SLOT = 15;
+
+    private static final class JoinMenu implements InventoryHolder {
+        private Inventory inventory;
+
+        @Override
+        public Inventory getInventory() {
+            return inventory;
+        }
+    }
+
+    /** /lobby menu: a green concrete to join the lobby and a red concrete to close the menu. The NPC runs this. */
+    private void openJoinMenu(Player player) {
+        if (members.containsKey(player.getUniqueId())) {
+            error(player, "You are already in the minigames lobby. Use /lobby leave or the red concrete to go back.");
+            return;
+        }
+        JoinMenu holder = new JoinMenu();
+        Inventory inventory = Bukkit.createInventory(holder, 27,
+                Component.text("Join the minigames lobby?", NamedTextColor.DARK_GRAY));
+        holder.inventory = inventory;
+        inventory.setItem(MENU_YES_SLOT, menuButton(Material.GREEN_CONCRETE, "Yes, join minigames lobby",
+                NamedTextColor.GREEN, "Kick a football around while a vote picks the next game."));
+        inventory.setItem(MENU_NO_SLOT, menuButton(Material.RED_CONCRETE, "No, exit menu",
+                NamedTextColor.RED, "Close this menu."));
+        player.openInventory(inventory);
+    }
+
+    private ItemStack menuButton(Material material, String name, NamedTextColor color, String description) {
+        ItemStack item = new ItemStack(material);
+        ItemMeta meta = item.getItemMeta();
+        meta.displayName(Component.text(name, color, TextDecoration.BOLD).decoration(TextDecoration.ITALIC, false));
+        meta.lore(List.of(Component.text(description, NamedTextColor.GRAY).decoration(TextDecoration.ITALIC, false)));
+        item.setItemMeta(meta);
+        return item;
+    }
+
+    @EventHandler(priority = EventPriority.HIGH)
+    public void onJoinMenuClick(InventoryClickEvent event) {
+        if (!(event.getInventory().getHolder() instanceof JoinMenu)) return;
+        event.setCancelled(true); // nothing can be taken out of or put into the menu
+        if (!(event.getWhoClicked() instanceof Player player) || event.getClickedInventory() != event.getInventory()) return;
+        int slot = event.getSlot();
+        if (slot != MENU_YES_SLOT && slot != MENU_NO_SLOT) return;
+        boolean join = slot == MENU_YES_SLOT;
+        // Next tick: the menu is closed first, then the player is sent to the lobby.
+        Bukkit.getScheduler().runTask(plugin, () -> {
+            player.closeInventory();
+            if (join) join(player);
+        });
+    }
+
+    @EventHandler
+    public void onJoinMenuDrag(InventoryDragEvent event) {
+        if (event.getInventory().getHolder() instanceof JoinMenu) event.setCancelled(true);
     }
 
     // ------------------------------------------------------------------ the vote

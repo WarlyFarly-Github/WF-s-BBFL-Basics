@@ -48,6 +48,7 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
     enum Category {
         QUICKEST("Quickest Goal", Material.FEATHER, "quickest"),
         WINS("Most Matches Won", Material.TOTEM_OF_UNDYING, "wins"),
+        WIN_PERCENT("Matches Won %", Material.EXPERIENCE_BOTTLE, "percentage"),
         GOALS("Most Goals Scored", Material.SNOWBALL, "goals"),
         PLAYTIME("Most Time Played", Material.CLOCK, "playtime");
 
@@ -66,6 +67,7 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
         String name = "Unknown";
         int goals;
         int wins;
+        int matches; // matches played to a result (full time or a golden goal), for the win percentage
         long playSeconds;
         int quickestTicks; // match-clock ticks of the player's fastest goal; 0 = no goal yet
     }
@@ -91,13 +93,14 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
     }
 
     // Same layout as the other menus: 3 rows, two rows of heads, controls on the bottom row.
-    private static final int[] CATEGORY_SLOTS = {10, 12, 14, 16};
+    private static final int[] CATEGORY_SLOTS = {9, 11, 13, 15, 17};
     private static final int SLOT_PREVIOUS = 21;
     private static final int SLOT_PAGE = 22;
     private static final int SLOT_NEXT = 23;
     private static final int SLOT_BACK = 26;
     private static final int PAGE_SIZE = 18;
     private static final int MAX_PAGES = 64;
+    private static final int MIN_MATCHES_FOR_PERCENT = 5; // fewer matches than this and the win percentage isn't ranked
     private static final TextColor GOLD = TextColor.color(0xFFD700);
     private static final TextColor SILVER = TextColor.color(0xC0C0C0);
     private static final TextColor BRONZE = TextColor.color(0xCD7F32);
@@ -137,6 +140,11 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
         statsOf(id).wins++;
     }
 
+    /** A match this player took part in was played to a result (won, lost or drawn). */
+    void recordMatchPlayed(UUID id) {
+        statsOf(id).matches++;
+    }
+
     void addPlaySeconds(UUID id, int seconds) {
         statsOf(id).playSeconds += seconds;
     }
@@ -161,6 +169,8 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
             s.name = section.getString("name", "Unknown");
             s.goals = section.getInt("goals");
             s.wins = section.getInt("wins");
+            // Matches played were not counted before the win percentage existed, so older wins count as played.
+            s.matches = Math.max(section.getInt("matches"), s.wins);
             s.playSeconds = section.getLong("play-seconds");
             s.quickestTicks = section.getInt("quickest-ticks");
             stats.put(id, s);
@@ -179,6 +189,7 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
             yaml.set(path + ".name", s.name);
             yaml.set(path + ".goals", s.goals);
             yaml.set(path + ".wins", s.wins);
+            yaml.set(path + ".matches", s.matches);
             yaml.set(path + ".play-seconds", s.playSeconds);
             yaml.set(path + ".quickest-ticks", s.quickestTicks);
         }
@@ -201,18 +212,28 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
         return switch (category) {
             case QUICKEST -> s.quickestTicks;
             case WINS -> s.wins;
+            case WIN_PERCENT -> s.matches == 0 ? 0 : s.wins * 10000L / s.matches; // hundredths of a percent
             case GOALS -> s.goals;
             case PLAYTIME -> s.playSeconds;
         };
     }
 
+    /** Whether the player is on this board. The win percentage needs a few matches first, so 1 win from 1 isn't #1. */
+    private boolean ranked(Category category, Stats s) {
+        if (category == Category.WIN_PERCENT) return s.matches >= MIN_MATCHES_FOR_PERCENT;
+        return value(category, s) > 0;
+    }
+
     private List<Entry> ranking(Category category) {
         List<Entry> list = new ArrayList<>();
         for (Map.Entry<UUID, Stats> e : stats.entrySet()) {
-            if (value(category, e.getValue()) > 0) list.add(new Entry(e.getKey(), e.getValue()));
+            if (ranked(category, e.getValue())) list.add(new Entry(e.getKey(), e.getValue()));
         }
         Comparator<Entry> byValue = Comparator.comparingLong(e -> value(category, e.stats()));
         if (category != Category.QUICKEST) byValue = byValue.reversed(); // quickest: lowest time wins
+        if (category == Category.WIN_PERCENT) { // the same percentage: whoever played more matches is higher
+            byValue = byValue.thenComparing(Comparator.comparingInt((Entry e) -> e.stats().matches).reversed());
+        }
         list.sort(byValue.thenComparing(e -> e.stats().name.toLowerCase(Locale.ROOT)));
         return list;
     }
@@ -221,6 +242,8 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
         return switch (category) {
             case QUICKEST -> formatGoalTime(s.quickestTicks);
             case WINS -> s.wins + (s.wins == 1 ? " win" : " wins");
+            case WIN_PERCENT -> String.format(Locale.ROOT, "%.1f%% (%d/%d)",
+                    s.matches == 0 ? 0.0 : s.wins * 100.0 / s.matches, s.wins, s.matches);
             case GOALS -> s.goals + (s.goals == 1 ? " goal" : " goals");
             case PLAYTIME -> formatDuration(s.playSeconds);
         };
@@ -260,7 +283,7 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
                 return true;
             }
         }
-        player.sendMessage(Component.text("Usage: /leaderboard [quickest|wins|goals|playtime]", NamedTextColor.RED));
+        player.sendMessage(Component.text("Usage: /leaderboard [quickest|wins|percentage|goals|playtime]", NamedTextColor.RED));
         return true;
     }
 
@@ -301,7 +324,9 @@ final class LeaderboardManager implements CommandExecutor, TabCompleter, Listene
         List<Entry> ranking = ranking(category);
         List<Component> lore = new ArrayList<>();
         if (ranking.isEmpty()) {
-            lore.add(plain("Nobody is on this board yet.", NamedTextColor.GRAY));
+            lore.add(plain(category == Category.WIN_PERCENT
+                    ? "Nobody has played " + MIN_MATCHES_FOR_PERCENT + " matches yet."
+                    : "Nobody is on this board yet.", NamedTextColor.GRAY));
         } else {
             Entry top = ranking.get(0);
             lore.add(plain("#1 " + top.stats().name + ": " + format(category, top.stats()), GOLD));

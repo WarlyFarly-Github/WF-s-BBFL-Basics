@@ -2,7 +2,10 @@ package dev.whistle;
 
 import dev.whistle.Match.Team;
 import net.kyori.adventure.text.Component;
+import net.kyori.adventure.text.event.ClickEvent;
+import net.kyori.adventure.text.event.HoverEvent;
 import net.kyori.adventure.text.format.NamedTextColor;
+import net.kyori.adventure.text.format.TextDecoration;
 import org.bukkit.Bukkit;
 import org.bukkit.Color;
 import org.bukkit.Location;
@@ -244,7 +247,19 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
         }
         player.sendMessage(Component.text("Stadiums:", NamedTextColor.GOLD));
         for (Stadium stadium : stadiums.values()) {
-            player.sendMessage(Component.text(stadium.name + " - " + builderName(stadium), NamedTextColor.WHITE));
+            Component line = Component.text(stadium.name + " - " + builderName(stadium), NamedTextColor.WHITE);
+            String warp = "/warp " + stadium.name; // each stadium has an Essentials warp with the same name
+            if (BedrockSupport.isBedrock(player)) {
+                // Bedrock players can't click chat, so show the command to type instead.
+                line = line.append(Component.text(" (" + warp + ")", NamedTextColor.YELLOW));
+            } else {
+                line = line.append(Component.text(" "))
+                        .append(Component.text("[Teleport]", NamedTextColor.GREEN, TextDecoration.BOLD)
+                                .clickEvent(ClickEvent.runCommand(warp))
+                                .hoverEvent(HoverEvent.showText(
+                                        Component.text("Click to teleport to " + stadium.name, NamedTextColor.GRAY))));
+            }
+            player.sendMessage(line);
         }
     }
 
