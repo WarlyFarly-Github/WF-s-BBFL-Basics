@@ -165,6 +165,7 @@ final class Match {
             blueLeagueName = name;
             blueLeagueRgb = rgb;
         }
+        updateBar(); // the scoreboard at the top shows the team names and colours
     }
 
     void clearLeagueTeam(Team team) {
@@ -317,8 +318,9 @@ final class Match {
                     .append(Component.text(" " + blueName, NamedTextColor.WHITE, TextDecoration.BOLD)));
             return;
         }
-        bar.name(Component.text("RED ", NamedTextColor.RED, TextDecoration.BOLD)
+        // "RED"/"BLUE", or the league team's name and colour once /match team has set one.
+        bar.name(Component.text(teamName(Team.RED).toUpperCase() + " ", teamColor(Team.RED), TextDecoration.BOLD)
                 .append(Component.text(redScore + " - " + blueScore, NamedTextColor.WHITE, TextDecoration.BOLD))
-                .append(Component.text(" BLUE", NamedTextColor.BLUE, TextDecoration.BOLD)));
+                .append(Component.text(" " + teamName(Team.BLUE).toUpperCase(), teamColor(Team.BLUE), TextDecoration.BOLD)));
     }
 }

@@ -47,6 +47,9 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
     private final File file;
     private final Map<String, Stadium> stadiums = new LinkedHashMap<>();
 
+    /** The Builder's Guide answers /stadium for players who are in it (nothing they do there is saved). */
+    private BuildersGuide guide;
+
     /** The stadium each builder last worked on, so /stadium confirm and /stadium edit work without a name. */
     private final Map<UUID, String> lastEdited = new HashMap<>();
 
@@ -65,8 +68,21 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
         plugin.getServer().getScheduler().runTaskTimer(plugin, this::showGoalParticles, 20L, 10L);
     }
 
+    void setGuide(BuildersGuide guide) {
+        this.guide = guide;
+    }
+
     Stadium get(String name) {
         return stadiums.get(name.toLowerCase());
+    }
+
+    /** Draws a practice stadium (never saved) with the same particles a builder sees on their own stadium. */
+    void drawPreview(Player viewer, Stadium stadium) {
+        if (stadium.confirmed) return;
+        for (Team team : Team.values()) drawGoal(viewer, stadium, team);
+        drawCenter(viewer, stadium);
+        drawBounds(viewer, stadium);
+        drawPositions(viewer, stadium);
     }
 
     List<String> names() {
@@ -86,6 +102,8 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
             sender.sendMessage(Component.text("Only players can use this command.", NamedTextColor.RED));
             return true;
         }
+        // Players in the Builder's Guide get the practice version of every subcommand except /stadium list.
+        if (guide != null && guide.handleStadium(player, args)) return true;
         // /stadium list is open to everyone; every other subcommand needs the builder role.
         boolean listOnly = args.length > 0 && args[0].equalsIgnoreCase("list");
         if (!listOnly && !canBuild(player)) {
@@ -127,6 +145,10 @@ final class StadiumManager implements CommandExecutor, TabCompleter, Listener {
     @Override
     public List<String> onTabComplete(CommandSender sender, Command command, String alias, String[] args) {
         if (!(sender instanceof Player player)) return List.of();
+        if (guide != null) {
+            List<String> practice = guide.tabComplete(player, args);
+            if (practice != null) return practice;
+        }
         if (!canBuild(player)) {
             return args.length == 1 ? filter(List.of("list"), args[0]) : List.of();
         }

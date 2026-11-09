@@ -94,7 +94,8 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
      * TEAMS > TEAM_ROLE (Main / Substitute) > PLAYERS (invite) or SUBS (the bench) > SUB_OUT (who comes off).
      * SUB_TEAMS is the shortcut referees get from /match sub.
      */
-    private enum MenuType { MAIN, TIMINGS, TEAMS, TEAM_ROLE, SUB_TEAMS, STADIUMS, PLAYERS, SUBS, SUB_OUT, CARDS }
+    private enum MenuType { MAIN, TIMINGS, TEAMS, TEAM_ROLE, SUB_TEAMS, STADIUMS, PLAYERS, SUBS, SUB_OUT, CARDS,
+            LEAGUE_SIDE, LEAGUE_PICK }
 
     /** The cards a referee can show. Two yellows are a red. */
     private enum Card { YELLOW, RED }
@@ -136,11 +137,19 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     // Slot layout (all menus are 3 rows).
     // Match Setup: Cancel, Invite, Timings (the clock, in the middle), Stadium, Start - every other slot of the middle row.
-    private static final int SLOT_CANCEL = 9;
-    private static final int SLOT_INVITE = 11;
-    private static final int SLOT_TIMINGS = 13;
-    private static final int SLOT_STADIUM = 15;
-    private static final int SLOT_START = 17;
+    // Match Setup, laid out like the challenge menu: the settings spread along the top row, Cancel and Start in the
+    // bottom corners (far apart, so one can't be hit by mistake for the other).
+    private static final int SLOT_INVITE = 1;
+    private static final int SLOT_TIMINGS = 3;
+    private static final int SLOT_STADIUM = 5;
+    private static final int SLOT_TEAMS = 7;
+    private static final int SLOT_CANCEL = 18;
+    private static final int SLOT_START = 26;
+    // League teams: the side picker, and the paged list of teams (eight to a page, spaced out like the menus above).
+    private static final int SLOT_LEAGUE_RED = 3;
+    private static final int SLOT_LEAGUE_BLUE = 5;
+    private static final int SLOT_NO_LEAGUE_TEAM = 18;
+    private static final int[] LEAGUE_SLOTS = {1, 3, 5, 7, 10, 12, 14, 16};
     // The invite menu: Red, Invite Server, Referees, Blue, evenly spaced.
     private static final int SLOT_RED_TEAM = 10;
     private static final int SLOT_SERVER_INVITE = 12;
@@ -169,6 +178,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
     private final NamespacedKey stadiumKey;
     private final NamespacedKey refereeWhistleKey;
     private final NamespacedKey cardKey;
+    private final NamespacedKey leagueTeamKey;
     private Supplier<ItemStack> whistleSupplier; // the plugin's Whistle item, which referees are given
     private final Map<UUID, Match> matchByPlayer = new HashMap<>();
     private final Map<UUID, Invite> invites = new HashMap<>();
@@ -303,6 +313,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         this.ballKey = new NamespacedKey(plugin, "football");
         this.refereeWhistleKey = new NamespacedKey(plugin, "referee_whistle");
         this.cardKey = new NamespacedKey(plugin, "referee_card");
+        this.leagueTeamKey = new NamespacedKey(plugin, "league_team_name");
         this.targetKey = new NamespacedKey(plugin, "invite_target");
         this.jerseyKey = new NamespacedKey(plugin, "jersey");
         this.stadiumKey = new NamespacedKey(plugin, "stadium_choice");
@@ -967,42 +978,57 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
 
     /**
      * /match team <red|blue> <league team|none>: makes a side one of the teams from the league script. Its name and
-     * hex colour then replace "Red"/"Blue" in this match (jerseys, name tags, menus and messages).
+     * hex colour then replace "Red"/"Blue" in this match (jerseys, name tags, menus and messages). With no arguments
+     * it opens the League Teams menu, which does the same thing with clicks.
      */
     private void setLeagueTeam(Player host, String[] args) {
         Match match = hostedMatch(host);
         if (match == null) return;
+        if (args.length == 1) {
+            openLeagueSideMenu(host);
+            return;
+        }
         if (args.length < 3 || !(args[1].equalsIgnoreCase("red") || args[1].equalsIgnoreCase("blue"))) {
-            error(host, "Usage: /match team <red|blue> <league team name|none>");
-            return;
-        }
-        if (match.duel || match.quick) {
-            error(host, "League teams can only be used in league matches, not quickmatches or duels.");
-            return;
-        }
-        if (match.started) {
-            error(host, "Teams can only be set before the match starts.");
+            error(host, "Usage: /match team   or   /match team <red|blue> <league team name|none>");
             return;
         }
         Team side = args[1].equalsIgnoreCase("red") ? Team.RED : Team.BLUE;
+        applyLeagueTeam(host, match, side, String.join(" ", List.of(args).subList(2, args.length)));
+    }
+
+    /** Whether this match can have league teams set right now; tells the host why not if it can't. */
+    private boolean canSetLeagueTeams(Player host, Match match) {
+        if (match.duel || match.quick) {
+            error(host, "League teams can only be used in league matches, not quickmatches or duels.");
+            return false;
+        }
+        if (match.started) {
+            error(host, "Teams can only be set before the match starts.");
+            return false;
+        }
+        return true;
+    }
+
+    /** Sets (or, with "none", clears) the league team on one side. Returns true if it worked. */
+    private boolean applyLeagueTeam(Player host, Match match, Team side, String typed) {
+        if (!canSetLeagueTeams(host, match)) return false;
         Team other = side == Team.RED ? Team.BLUE : Team.RED;
-        String typed = String.join(" ", List.of(args).subList(2, args.length));
 
         if (typed.equalsIgnoreCase("none")) {
             match.clearLeagueTeam(side);
         } else {
             if (!leagueTeams.available()) {
                 error(host, "League teams aren't available: Skript isn't running on this server.");
-                return;
+                return false;
             }
             LeagueTeams.LeagueTeam league = leagueTeams.find(typed);
             if (league == null) {
                 error(host, "No league team called " + typed + ". Teams are created with /team-create in Discord.");
-                return;
+                return false;
             }
             if (league.key().equals(match.leagueKey(other))) {
                 error(host, league.name() + " is already the " + other.label.toLowerCase() + " team in this match.");
-                return;
+                return false;
             }
             match.setLeagueTeam(side, league.key(), league.name(), league.rgb());
         }
@@ -1022,6 +1048,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                         NamedTextColor.GRAY))
                 .append(typed.equalsIgnoreCase("none") ? Component.empty()
                         : Component.text(match.teamName(side), match.teamColor(side), TextDecoration.BOLD)));
+        return true;
     }
 
     private void applyStadium(Player host, Match match, Stadium stadium) {
@@ -1203,7 +1230,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         return match;
     }
 
-    /** First menu of /match create: cancel, invite, timings, change stadium, start. */
+    /** First menu of /match create: invite, timings, stadium and league teams along the top; cancel and start below. */
     private void openMainMenu(Player host) {
         Match match = menuMatch(host);
         if (match == null) return;
@@ -1211,8 +1238,6 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
         MenuGui holder = new MenuGui(MenuType.MAIN, 0, 0, null);
         Inventory inventory = newMenu(holder, "Match Setup");
 
-        inventory.setItem(SLOT_CANCEL, button(Material.RED_CONCRETE, "Cancel Match", NamedTextColor.RED,
-                plain("Cancels this match.", NamedTextColor.GRAY)));
         inventory.setItem(SLOT_INVITE, button(Material.DIAMOND, "Invite Players", NamedTextColor.BLUE,
                 plain("Red: " + match.size(Team.RED) + "/" + Match.MAX_PER_TEAM
                         + "   Blue: " + match.size(Team.BLUE) + "/" + Match.MAX_PER_TEAM, NamedTextColor.GRAY)));
@@ -1222,6 +1247,14 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 plain("Click to change the timings.", NamedTextColor.YELLOW)));
         inventory.setItem(SLOT_STADIUM, button(Material.BIRCH_LOG, "Change Stadium", NamedTextColor.BLUE,
                 plain("Current: " + (match.stadium == null ? "none chosen" : match.stadium.name), NamedTextColor.GRAY)));
+        inventory.setItem(SLOT_TEAMS, button(Material.WHITE_BANNER, "League Teams", NamedTextColor.AQUA,
+                Component.text("Red: ", NamedTextColor.GRAY).append(Component.text(match.teamName(Team.RED), match.teamColor(Team.RED)))
+                        .decoration(TextDecoration.ITALIC, false),
+                Component.text("Blue: ", NamedTextColor.GRAY).append(Component.text(match.teamName(Team.BLUE), match.teamColor(Team.BLUE)))
+                        .decoration(TextDecoration.ITALIC, false),
+                plain("Click to pick a league team for each side.", NamedTextColor.YELLOW)));
+        inventory.setItem(SLOT_CANCEL, button(Material.RED_CONCRETE, "Cancel Match", NamedTextColor.RED,
+                plain("Cancels this match.", NamedTextColor.GRAY)));
         inventory.setItem(SLOT_START, button(Material.LIME_CONCRETE, "Start Match", NamedTextColor.GREEN));
         host.openInventory(inventory);
     }
@@ -1337,6 +1370,74 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                 plain(match.subs(Team.BLUE).size() + " substitutes", NamedTextColor.GRAY)));
         inventory.setItem(SLOT_BACK, backButton());
         player.openInventory(inventory);
+    }
+
+    /** League Teams, step one: which side (red or blue) to give a league team to. */
+    private void openLeagueSideMenu(Player host) {
+        Match match = menuMatch(host);
+        if (match == null || !canSetLeagueTeams(host, match)) return;
+
+        MenuGui holder = new MenuGui(MenuType.LEAGUE_SIDE, 0, 0, null);
+        Inventory inventory = newMenu(holder, "League Teams");
+        inventory.setItem(SLOT_LEAGUE_RED, leagueSideItem(match, Team.RED));
+        inventory.setItem(SLOT_LEAGUE_BLUE, leagueSideItem(match, Team.BLUE));
+        inventory.setItem(SLOT_BACK, backButton());
+        host.openInventory(inventory);
+    }
+
+    private ItemStack leagueSideItem(Match match, Team side) {
+        boolean set = match.leagueKey(side) != null;
+        return teamItem(match, side, side.label + " Side", match.teamColor(side),
+                plain("Current: " + match.teamName(side) + (set ? "" : " (no league team)"), NamedTextColor.GRAY),
+                plain("Click to choose a league team.", NamedTextColor.YELLOW));
+    }
+
+    /** League Teams, step two: every league team, a page at a time, to give to this side. */
+    private void openLeaguePickMenu(Player host, Team side, int page) {
+        Match match = menuMatch(host);
+        if (match == null || !canSetLeagueTeams(host, match)) return;
+        if (!leagueTeams.available()) {
+            error(host, "League teams aren't available: Skript isn't running on this server.");
+            return;
+        }
+
+        List<LeagueTeams.LeagueTeam> all = new ArrayList<>(leagueTeams.all());
+        all.sort((a, b) -> String.CASE_INSENSITIVE_ORDER.compare(a.name(), b.name()));
+        Team other = side == Team.RED ? Team.BLUE : Team.RED;
+
+        int pages = Math.max(1, Math.min(MAX_PAGES, (all.size() + LEAGUE_SLOTS.length - 1) / LEAGUE_SLOTS.length));
+        page = Math.max(1, Math.min(page, pages));
+
+        MenuGui holder = new MenuGui(MenuType.LEAGUE_PICK, page, pages, side);
+        Inventory inventory = newMenu(holder, "Choose the " + side.label + " Team");
+        for (int i = 0; i < LEAGUE_SLOTS.length; i++) {
+            int index = (page - 1) * LEAGUE_SLOTS.length + i;
+            if (index >= all.size()) break;
+            LeagueTeams.LeagueTeam league = all.get(index);
+
+            Component status;
+            if (league.key().equals(match.leagueKey(side))) {
+                status = plain("Already the " + side.label.toLowerCase() + " team", NamedTextColor.GREEN);
+            } else if (league.key().equals(match.leagueKey(other))) {
+                status = plain("Already the " + other.label.toLowerCase() + " team", NamedTextColor.RED);
+            } else {
+                status = plain("Click to make them the " + side.label.toLowerCase() + " team", NamedTextColor.YELLOW);
+            }
+            ItemStack item = button(Material.LEATHER_CHESTPLATE, league.name(), TextColor.color(league.rgb()), status);
+            LeatherArmorMeta meta = (LeatherArmorMeta) item.getItemMeta();
+            meta.setColor(Color.fromRGB(league.rgb()));
+            meta.addItemFlags(ItemFlag.HIDE_DYE);
+            meta.getPersistentDataContainer().set(leagueTeamKey, PersistentDataType.STRING, league.name());
+            item.setItemMeta(meta);
+            inventory.setItem(LEAGUE_SLOTS[i], item);
+        }
+        inventory.setItem(SLOT_NO_LEAGUE_TEAM, button(Material.BARRIER, "No League Team", NamedTextColor.RED,
+                plain("Makes this side just " + side.label + " again.", NamedTextColor.GRAY)));
+        inventory.setItem(SLOT_PREVIOUS, arrowBanner("Previous Page", false));
+        inventory.setItem(SLOT_PAGE, pageMarker(page, pages));
+        inventory.setItem(SLOT_NEXT, arrowBanner("Next Page", true));
+        inventory.setItem(SLOT_BACK, backButton());
+        host.openInventory(inventory);
     }
 
     /** The stadium list, the player list for invites, a team's substitutes and the "who comes off" list share one layout. */
@@ -1524,6 +1625,7 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                         cancelMatch(match);
                     });
                     case SLOT_INVITE -> later(() -> openTeamMenu(host));
+                    case SLOT_TEAMS -> later(() -> openLeagueSideMenu(host));
                     case SLOT_TIMINGS -> later(() -> openTimingsMenu(host));
                     case SLOT_STADIUM -> later(() -> openPagedMenu(host, MenuType.STADIUMS, 1, null));
                     case SLOT_START -> later(() -> {
@@ -1578,6 +1680,43 @@ final class MatchManager implements CommandExecutor, TabCompleter, Listener {
                         else openMainMenu(host);
                     });
                     default -> { }
+                }
+            }
+            case LEAGUE_SIDE -> {
+                if (match.started) {
+                    later(host::closeInventory);
+                    return;
+                }
+                switch (slot) {
+                    case SLOT_LEAGUE_RED -> later(() -> openLeaguePickMenu(host, Team.RED, 1));
+                    case SLOT_LEAGUE_BLUE -> later(() -> openLeaguePickMenu(host, Team.BLUE, 1));
+                    case SLOT_BACK -> later(() -> openMainMenu(host));
+                    default -> { }
+                }
+            }
+            case LEAGUE_PICK -> {
+                if (match.started) {
+                    later(host::closeInventory);
+                    return;
+                }
+                ItemStack clicked = event.getCurrentItem();
+                if (slot == SLOT_BACK) {
+                    later(() -> openLeagueSideMenu(host));
+                } else if (slot == SLOT_NO_LEAGUE_TEAM) {
+                    later(() -> {
+                        applyLeagueTeam(host, match, menu.team, "none");
+                        openLeagueSideMenu(host);
+                    });
+                } else if (slot == SLOT_PREVIOUS || slot == SLOT_NEXT) {
+                    int target = menu.page + (slot == SLOT_NEXT ? 1 : -1);
+                    if (target >= 1 && target <= menu.pages) later(() -> openLeaguePickMenu(host, menu.team, target));
+                } else if (clicked.hasItemMeta()) {
+                    String name = clicked.getItemMeta().getPersistentDataContainer().get(leagueTeamKey, PersistentDataType.STRING);
+                    if (name == null) return;
+                    later(() -> {
+                        applyLeagueTeam(host, match, menu.team, name);
+                        openLeagueSideMenu(host); // shows the new team
+                    });
                 }
             }
             case CARDS -> {

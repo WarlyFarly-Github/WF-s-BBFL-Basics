@@ -4,7 +4,7 @@ version: 1.3.0
 author: WarlyFarly
 main: dev.whistle.WFsBBFLBasics
 api-version: '26.3'
-softdepend: [TAB, Geyser-Spigot, floodgate, Skript]
+softdepend: [TAB, Geyser-Spigot, floodgate, Skript, DecentHolograms, LuckPerms]
 description: Basic utilities for BBFL, including the admin Whistle and football matches.
 commands:
   bbflbasics:
@@ -71,6 +71,12 @@ commands:
     usage: /achievements
     aliases: [ach]
     permission: wfsbbfl.achievements
+  tutorial:
+    description: Start or leave a tutorial (the Builder's Guide).
+    usage: /tutorial <builders-guide|leave>
+  next:
+    description: Continue to the next step of a tutorial.
+    usage: /next
   stadium:
     description: Create stadiums, set centre points and goal areas.
     usage: /stadium <create|delete|list|info|setcentre|setstands|setgoal|goalheight|block|confirm|edit|invite|uninvite|claim|builder|bounds|setpos1|setpos2|setpos3|setpos4|setpos5>

@@ -44,3 +44,12 @@ hot-potato:
   fuse-max-seconds: 25
   # How far the blast reaches (blocks). A bomb that catches nobody makes the next one 1 block bigger, up to 9.
   blast-radius: 4.0
+
+# The Builder's Guide (Tutorials in the navigator): an interactive stadium-building tutorial in its own flat world.
+builders-guide:
+  # Name of the practice world. It is created the first time someone starts the guide.
+  world: builders_guide
+  # The LuckPerms group given to players who finish the guide.
+  luckperms-group: builder
+  # Seconds after finishing before the player is taken back to where they started.
+  return-delay-seconds: 10

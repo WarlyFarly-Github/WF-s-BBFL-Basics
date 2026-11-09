@@ -33,6 +33,7 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
     private MinigamesLobbyManager minigamesLobby;
     private QuickMatchManager quickMatches;
     private LeaderboardManager leaderboard;
+    private BuildersGuide buildersGuide;
     private final Map<UUID, Long> lastBlown = new HashMap<>();
 
     @Override
@@ -172,9 +173,22 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
             lobbyCommand.setTabCompleter(lobbies);
         }
 
-        getServer().getPluginManager().registerEvents(new NavigatorManager(this), this);
+        BuildersGuide buildersGuide = new BuildersGuide(this, stadiums, matches);
+        this.buildersGuide = buildersGuide;
+        stadiums.setGuide(buildersGuide);
+        getServer().getPluginManager().registerEvents(buildersGuide, this);
+        PluginCommand tutorialCommand = getCommand("tutorial");
+        if (tutorialCommand != null) {
+            tutorialCommand.setExecutor(buildersGuide);
+            tutorialCommand.setTabCompleter(buildersGuide);
+        }
+        PluginCommand nextCommand = getCommand("next");
+        if (nextCommand != null) nextCommand.setExecutor(buildersGuide);
+
+        getServer().getPluginManager().registerEvents(new NavigatorManager(this, buildersGuide), this);
 
         minigamesLobby = new MinigamesLobbyManager(this, matches, challenges, lobbies);
+        buildersGuide.setMinigamesLobby(minigamesLobby);
         matches.setMinigamesLobby(minigamesLobby);
         getServer().getPluginManager().registerEvents(minigamesLobby, this);
         PluginCommand minigamesLobbyCommand = getCommand("lobby");
@@ -195,6 +209,7 @@ public final class WFsBBFLBasics extends JavaPlugin implements Listener {
 
     @Override
     public void onDisable() {
+        if (buildersGuide != null) buildersGuide.shutdown();
         if (minigamesLobby != null) minigamesLobby.shutdown();
         if (quickMatches != null) quickMatches.shutdown();
         if (matches != null) matches.shutdown();
